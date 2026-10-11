@@ -2,7 +2,7 @@
 
 A personal document archive that runs in the browser on phone and PC and stores everything in your own OneDrive.
 
-**Open the app:** https://jacovanstraten-glitch.github.io/document-vault/
+**Open the app:** https://jacovanstraten-glitch.github.io/doc-vault/
 
 ## What it does
 
@@ -34,7 +34,7 @@ The code in this repository contains no personal data and no secrets. The client
 
 ## Setup (already done)
 
-1. Microsoft Entra app registration **Document Vault** — personal Microsoft accounts only, platform *Single-page application*, redirect URI `https://jacovanstraten-glitch.github.io/document-vault/`.
+1. Microsoft Entra app registration **Document Vault** — personal Microsoft accounts only, platform *Single-page application*, redirect URI `https://jacovanstraten-glitch.github.io/doc-vault/`.
 2. Its Application (client) ID is in `config.js`.
 3. GitHub Pages serves the `main` branch root.
 

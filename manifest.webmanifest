@@ -1,9 +1,9 @@
 {
-  "id": "./?app=document-vault-2",
+  "id": "./",
   "name": "Document Vault",
   "short_name": "Vault",
   "description": "Scan, search and file your documents in your own OneDrive.",
-  "start_url": "./?app=document-vault-2",
+  "start_url": "./",
   "scope": "./",
   "display": "standalone",
   "background_color": "#F2F5F3",
