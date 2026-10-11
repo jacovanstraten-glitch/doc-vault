@@ -32,17 +32,19 @@
       <button data-space="private" aria-pressed="false">Private</button>
       <button data-space="business" aria-pressed="false">Business</button>
     </div>
-    <label class="search" for="q"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg><span class="sr">Search</span><input id="q" type="search" placeholder="Search everything, including text inside documents" autocomplete="off"></label>
+    <label class="search" for="q"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg><span class="sr">Search</span><input id="q" type="search" placeholder="Search words, a year (2026) or amount (&gt;500)" autocomplete="off"></label>
   </div>
 </header>
 <div class="wrap">
   <nav class="chips" id="chips" aria-label="Filter"></nav>
+  <div class="filterbar" id="filterbar"></div>
   <div id="notice"></div>
   <label class="dropzone" for="fileIn" id="dropzone"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4M7 9l5-5 5 5"/><path d="M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3"/></svg><span><b>Drop PDFs or photos here</b>, or click to choose files. Paste a screenshot with Ctrl+V. Outlook e-mails (.msg, .eml) work too. The text is read so you can search it later.</span></label>
   <div id="combineBox"></div>
   <div id="importBox"></div>
   <main id="list"></main>
 </div>
+<div class="selbar" id="selbar" hidden></div>
 <button class="fab touch" id="fab"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg>Scan document</button>
 </div>
 

@@ -26,6 +26,7 @@ const ICON = {
   open:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 4h6v6M20 4l-9 9"/><path d="M19 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h5"/></svg>',
   x:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg>',
   check:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5 9-10"/></svg>',
+  cal:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/></svg>',
   share:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="m8.6 13.5 6.8 4M15.4 6.5l-6.8 4"/></svg>',
   download:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v12M7 11l5 5 5-5"/><path d="M4 20h16"/></svg>',
   inbox:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 13h5l1 3h6l1-3h5"/><path d="M5 5h14l2 8v6H3v-6z"/></svg>'
@@ -119,7 +120,7 @@ const idb = (() => {
 /* ================= state ================= */
 const state = {
   index: emptyIndex(), etag: null, loaded: false,
-  space: "all", cat: null, q: "", online: navigator.onLine,
+  space: "all", cat: null, q: "", year: "", amt: "", selecting: false, sel: new Set(), online: navigator.onLine,
   syncing: false, dirty: false, syncError: ""
 };
 function emptyIndex() { return {app: "document-vault", version: 1, docs: {}, categories: structuredClone(DEFAULT_CATS), catsUpdatedAt: 0, updatedAt: 0}; }
@@ -597,10 +598,33 @@ function suggestFromHistory(text, exceptId) {
 }
 
 /* ================= list and search ================= */
+// "2026" = year, ">500" / "<50" / "100-500" = amount; the rest is text
+function parseQuery(q) {
+  const terms = [], f = {};
+  const num = v => parseFloat(String(v).replace(/\./g, "").replace(",", "."));
+  for (const raw of norm(q).replace(/€\s+/g, "€").split(/\s+/).filter(Boolean)) {
+    let m;
+    if (/^(19|20)\d{2}$/.test(raw)) { f.year = raw; continue; }
+    if ((m = raw.match(/^€?(>=|<=|>|<)€?(\d[\d.,]*)$/))) { if (m[1][0] === ">") f.min = num(m[2]); else f.max = num(m[2]); continue; }
+    if ((m = raw.match(/^€?(\d[\d.,]*)\+$/))) { f.min = num(m[1]); continue; }
+    if ((m = raw.match(/^€?(\d[\d.,]*)-€?(\d[\d.,]*)$/)) && num(m[1]) < num(m[2]) && !/^(19|20)\d{2}$/.test(m[1])) { f.min = num(m[1]); f.max = num(m[2]); continue; }
+    terms.push(raw);
+  }
+  return {terms, f};
+}
+const AMT_FILTERS = {"": null, "lt50": {max: 50}, "gt100": {min: 100}, "gt500": {min: 500}, "gt1000": {min: 1000}};
 function filtered() {
-  const terms = norm(state.q).split(/\s+/).filter(Boolean);
+  const {terms, f} = parseQuery(state.q);
+  const year = f.year || state.year, af = {...(AMT_FILTERS[state.amt] || {}), ...("min" in f ? {min: f.min} : {}), ...("max" in f ? {max: f.max} : {})};
   const out = [];
   for (const d of docs()) {
+    if (year && docDate(d).slice(0, 4) !== year) continue;
+    if ("min" in af || "max" in af) {
+      const a = Number(d.amount);
+      if (d.amount === null || d.amount === undefined || d.amount === "" || isNaN(a)) continue;
+      if ("min" in af && a < af.min) continue;
+      if ("max" in af && a > af.max) continue;
+    }
     if (state.space !== "all" && (!d.filed || d.space !== state.space)) continue;
     if (state.cat === "__due") { if (!dueInfo(d)) continue; }
     else if (state.cat === "__inbox") { if (d.filed) continue; }
@@ -669,7 +693,8 @@ function render() {
     return;
   }
   const {list, terms} = filtered();
-  if (!list.length) { L.innerHTML = `<div class="empty"><h2>No matches</h2><p>Nothing matches ${state.q ? `“${esc(state.q)}”` : "this filter"}. Try a different word or switch to All.</p></div>`; return; }
+  renderFilterBar(list);
+  if (!list.length) { L.innerHTML = `<div class="empty"><h2>No matches</h2><p>Nothing matches ${state.q ? `“${esc(state.q)}”` : "this filter"}. Try a different word, another year or amount, or switch to All.</p></div>`; return; }
   let h = "", lastMonth = "";
   for (const d of list.slice(0, 400)) {
     if (!terms.length) {
@@ -679,8 +704,9 @@ function render() {
     const due = dueInfo(d), amt = fmtAmount(d.amount, d.currency);
     const sub = [d.sender, fmtDate(d.date)].filter(Boolean).join(" · ") || d.name || "";
     const sn = terms.length ? snippet(d.text, terms) : "";
-    h += `<button class="doc" data-id="${esc(d.id)}">
-      <img class="thumb" data-thumb="${esc(d.itemId || "")}" data-v="${esc(String(d.fileVersion || 0))}" alt="">
+    const sel = state.selecting && state.sel.has(d.id);
+    h += `<button class="doc${state.selecting ? " selecting" : ""}${sel ? " selected" : ""}" data-id="${esc(d.id)}" ${state.selecting ? `aria-pressed="${sel}"` : ""}>
+      ${state.selecting ? `<span class="tick" aria-hidden="true">${sel ? ICON.check : ""}</span>` : ""}<img class="thumb" data-thumb="${esc(d.itemId || "")}" data-v="${esc(String(d.fileVersion || 0))}" alt="">
       <span class="meta"><span class="t">${terms.length ? highlight(d.title || "Untitled", terms) : esc(d.title || "Untitled")}</span>
       <span class="sub">${esc(sub)}</span>
       <span class="tags">${d.filed ? `<span class="pill ${d.space}">${SPACE_LABEL[d.space]}</span><span class="cat">${esc(d.category)}</span>` : `<span class="due">To file</span>`}${d.weak ? `<span class="weakpill">Hard to read</span>` : ""}${due ? `<span class="due">${due.label}</span>` : ""}${amt ? `<span class="amt mono">${esc(amt)}</span>` : ""}</span>
@@ -689,6 +715,29 @@ function render() {
   if (list.length > 400) h += `<p class="hint">Showing 400 of ${list.length}. Search to narrow down.</p>`;
   L.innerHTML = h;
   observeThumbs();
+  renderSelBar();
+}
+function sumAmounts(list) {
+  const by = new Map();
+  for (const d of list) { const a = Number(d.amount); if (d.amount === null || d.amount === undefined || d.amount === "" || isNaN(a)) continue; const c = d.currency || "EUR"; by.set(c, (by.get(c) || 0) + a); }
+  return [...by.entries()].sort((a, b) => (b[0] === "EUR") - (a[0] === "EUR")).map(([c, v]) => fmtAmount(v, c)).join(" + ");
+}
+function renderFilterBar(list) {
+  const years = [...new Set(docs().map(d => docDate(d).slice(0, 4)).filter(Boolean))].sort().reverse();
+  const yOpts = `<option value="">All years</option>` + years.map(y => `<option${y === state.year ? " selected" : ""}>${y}</option>`).join("");
+  const aOpts = [["", "Any amount"], ["lt50", "Under €50"], ["gt100", "Over €100"], ["gt500", "Over €500"], ["gt1000", "Over €1,000"]].map(([v, l]) => `<option value="${v}"${v === state.amt ? " selected" : ""}>${l}</option>`).join("");
+  const total = sumAmounts(list);
+  $("#filterbar").innerHTML = `<label class="sr" for="fYear">Year</label><select id="fYear">${yOpts}</select>
+    <label class="sr" for="fAmt">Amount</label><select id="fAmt">${aOpts}</select>
+    <span class="fsum">${list.length} document${list.length === 1 ? "" : "s"}${total ? ` · total <b class="mono">${esc(total)}</b>` : ""}</span>
+    <span class="fbtns"><button class="btn" data-act="select">${state.selecting ? "Cancel selection" : "Select"}</button><button class="btn" data-act="export" ${list.length ? "" : "disabled"}>${ICON.download}Export these</button></span>`;
+}
+function renderSelBar() {
+  const bar = $("#selbar"), n = state.sel.size;
+  $("#fab").hidden = state.selecting;
+  if (!state.selecting) { bar.hidden = true; return; }
+  bar.hidden = false;
+  bar.innerHTML = `<span><b>${n}</b> selected</span><button class="btn" data-act="selall">Select all shown</button><button class="btn primary" data-act="merge" ${n >= 2 ? "" : "disabled"}>Merge into one</button><button class="btn" data-act="selexport" ${n ? "" : "disabled"}>${ICON.download}Export</button><button class="btn ghost" data-act="selcancel">Cancel</button>`;
 }
 
 /* thumbnails from OneDrive, cached on this device */
@@ -1386,21 +1435,311 @@ async function busy(b, label, fn) {
   try { await fn(); } catch (e) { if (!(e && e.name === "AbortError")) { console.error(e); toast(e.userMsg || errText(e)); } }
   finally { b.disabled = false; b.innerHTML = old; }
 }
-function downloadDoc(d, b) {
-  return busy(b, "Preparing…", async () => {
-    const f = await docFile(d), br = bridge();
-    if (br) { br.saveFile(await blobToB64(f), f.name, f.type); return; }
-    const u = URL.createObjectURL(f), a = document.createElement("a");
-    a.href = u; a.download = f.name; document.body.appendChild(a); a.click(); a.remove();
-    setTimeout(() => URL.revokeObjectURL(u), 30000);
-  });
+async function saveBlob(f) {
+  const br = bridge();
+  if (br) { br.saveFile(await blobToB64(f), f.name, f.type); return; }
+  const u = URL.createObjectURL(f), a = document.createElement("a");
+  a.href = u; a.download = f.name; document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(u), 60000);
 }
-function shareDoc(d, b) {
-  return busy(b, "Preparing…", async () => {
-    const f = await docFile(d), br = bridge();
-    if (br) { br.shareFile(await blobToB64(f), f.name, f.type, d.title || f.name); return; }
-    await navigator.share({files: [f], title: d.title || f.name});
-  });
+async function shareBlob(f, title) {
+  const br = bridge();
+  if (br) { br.shareFile(await blobToB64(f), f.name, f.type, title || f.name); return; }
+  await navigator.share({files: [f], title: title || f.name});
+}
+function downloadDoc(d, b) { return busy(b, "Preparing…", async () => saveBlob(await docFile(d))); }
+function shareDoc(d, b) { return busy(b, "Preparing…", async () => shareBlob(await docFile(d), d.title)); }
+
+/* ---- create a new document from a file (split, cut out, merge) ---- */
+async function createDoc(blob, fields, ext = ".pdf") {
+  const meta = {id: uid(), ...fields, createdAt: Date.now(), handled: false, hash: ""};
+  if (!catsFor(meta.space).includes(meta.category)) meta.category = catsFor(meta.space).at(-1);
+  const up = await uploadFile(folderOf(meta), fileNameOf(meta, ext), blob);
+  Object.assign(meta, {itemId: up.id, name: up.name, path: `${folderOf(meta)}/${up.name}`, size: up.size, webUrl: up.webUrl, fileVersion: 1});
+  putDoc(meta);
+  return meta;
+}
+async function deleteDoc(d) {
+  try { await g("DELETE", `/me/drive/items/${d.itemId}`); } catch (err) { if (err.status !== 404) throw err; }
+  if (d.originalItemId) { try { await g("DELETE", `/me/drive/items/${d.originalItemId}`); } catch {} }
+  putDoc({id: d.id, deleted: true, createdAt: d.createdAt});
+}
+const inherit = d => ({space: d.space, category: d.category, filed: d.filed, sender: d.sender, date: d.date, reference: "", amount: null, currency: d.currency || "EUR",
+  dueDate: "", tags: d.tags || [], notes: "", weak: false, autoFiled: ""});
+
+/* ---- export for the accountant ---- */
+function exportLabel() {
+  const {f} = parseQuery(state.q);
+  const parts = [];
+  if (state.space !== "all") parts.push(SPACE_LABEL[state.space]);
+  if (state.cat && !state.cat.startsWith("__")) parts.push(state.cat);
+  const y = f.year || state.year; if (y) parts.push(y);
+  return parts.length ? parts.join(" ") : `Documents ${new Date().toISOString().slice(0, 10)}`;
+}
+function openExport(list, label) {
+  if (!list.length) return toast("There is nothing to export.");
+  list = [...list].sort((a, b) => docDate(a).localeCompare(docDate(b)));
+  const byCat = new Map();
+  for (const d of list) { const k = d.filed ? `${SPACE_LABEL[d.space]} · ${d.category}` : "To file"; byCat.set(k, [...(byCat.get(k) || []), d]); }
+  showPanel("Export", `
+    <div class="field"><label for="x_name">Name of the export</label><input id="x_name" value="${esc(label)}"></div>
+    <div class="card"><h3>${list.length} document${list.length > 1 ? "s" : ""}${sumAmounts(list) ? ` · ${esc(sumAmounts(list))}` : ""}</h3>
+      <table class="xtable"><tbody>${[...byCat.entries()].map(([k, v]) => `<tr><td>${esc(k)}</td><td class="mono">${v.length}</td><td class="mono">${esc(sumAmounts(v))}</td></tr>`).join("")}</tbody></table>
+      <p class="hint">You get a ZIP with every file in a folder per category, and <span class="mono">Overview.xlsx</span>: one row per document with date, sender, reference and amount, plus a sheet with totals per category.</p></div>
+    <label class="toggle"><input type="checkbox" id="x_od" checked>Also save the ZIP in OneDrive › ${esc(BASE)} › Exports</label>
+    <div class="btnrow"><button class="btn primary grow" data-act="make">${ICON.download}Make export</button></div>
+    <div id="x_out"></div>`);
+  panel.onclick = async e => {
+    const b = e.target.closest("[data-act]"); if (!b) return;
+    if (b.dataset.act === "close") return closePanel();
+    if (b.dataset.act === "make") {
+      const name = safeSeg($("#x_name", panel).value || label, 80), toOd = $("#x_od", panel).checked;
+      b.disabled = true;
+      try {
+        const zip = await buildExport(list, name, t => { b.textContent = t; });
+        const file = new File([zip], `${name}.zip`, {type: "application/zip"});
+        let where = "";
+        if (toOd) { b.textContent = "Saving to OneDrive…"; const it = await uploadFile("Exports", file.name, file, {replace: true}); where = `Saved in OneDrive › ${BASE} › Exports › ${it.name}.`; }
+        b.innerHTML = `${ICON.check}Export ready`;
+        $("#x_out", panel).innerHTML = `<div class="flag info">${ICON.check}<span>${esc(where || "The export is ready.")}</span></div>
+          <div class="btnrow">${canDownload() ? `<button class="btn primary grow" data-act="xdl">${ICON.download}Download ZIP</button>` : ""}${canShare() ? `<button class="btn grow" data-act="xshare">${ICON.share}Share ZIP</button>` : ""}</div>`;
+        panel.dataset.xfile = "1"; panel._xfile = file;
+      } catch (err) { console.error(err); b.disabled = false; b.innerHTML = `${ICON.download}Make export`; toast(err.userMsg || errText(err)); }
+    }
+    if (b.dataset.act === "xdl") return busy(b, "Preparing…", () => saveBlob(panel._xfile));
+    if (b.dataset.act === "xshare") return busy(b, "Preparing…", () => shareBlob(panel._xfile, panel._xfile.name));
+  };
+}
+async function buildExport(list, name, progress) {
+  await loadScript("vendor/jszip.min.js"); await loadScript("vendor/xlsx.full.min.js");
+  const zip = new JSZip(), root = zip.folder(name), used = new Set(), rows = [];
+  for (let i = 0; i < list.length; i++) {
+    const d = list[i];
+    progress(`Collecting ${i + 1} of ${list.length}…`);
+    const folder = d.filed ? safeSeg(`${SPACE_LABEL[d.space]} - ${d.category}`, 80) : "To file";
+    let fname = d.name || fileNameOf(d, isPdfDoc(d) ? ".pdf" : ".jpg"), k = 2;
+    while (used.has(`${folder}/${fname}`)) fname = (d.name || "document").replace(/(\.[^.]+)?$/, m => ` (${k++})${m}`);
+    used.add(`${folder}/${fname}`);
+    root.file(`${folder}/${fname}`, await getFileBlob(d));
+    const amt = d.amount === null || d.amount === undefined || d.amount === "" || isNaN(Number(d.amount)) ? null : Number(d.amount);
+    rows.push([d.date ? new Date(d.date + "T12:00:00") : null, d.filed ? SPACE_LABEL[d.space] : "", d.filed ? d.category : "To file", d.sender || "", d.title || "",
+      d.reference || "", amt, d.currency || (amt !== null ? "EUR" : ""), d.dueDate ? new Date(d.dueDate + "T12:00:00") : null, `${folder}/${fname}`]);
+  }
+  progress("Making the overview…");
+  const head = ["Date", "Space", "Category", "From", "Title", "Reference", "Amount", "Currency", "Due / ends", "File in ZIP"];
+  const ws = XLSX.utils.aoa_to_sheet([head, ...rows], {cellDates: true});
+  ws["!cols"] = [12, 10, 26, 26, 40, 18, 12, 9, 12, 60].map(w => ({wch: w}));
+  for (let r = 2; r <= rows.length + 1; r++) {
+    if (ws[`A${r}`]) ws[`A${r}`].z = "dd-mm-yyyy";
+    if (ws[`I${r}`]) ws[`I${r}`].z = "dd-mm-yyyy";
+    if (ws[`G${r}`]) ws[`G${r}`].z = "#,##0.00";
+  }
+  ws["!autofilter"] = {ref: `A1:J${rows.length + 1}`};
+  const cats = [...new Set(rows.map(r => r[2]))];
+  const n = rows.length + 1;
+  const tot = [["Category", "Documents", "Total EUR"], ...cats.map((c, i) => [c, {f: `COUNTIF(Documents!C2:C${n},A${i + 2})`}, {f: `SUMIFS(Documents!G2:G${n},Documents!C2:C${n},A${i + 2},Documents!H2:H${n},"EUR")`, z: "#,##0.00"}]),
+    ["Total", {f: `SUM(B2:B${cats.length + 1})`}, {f: `SUM(C2:C${cats.length + 1})`, z: "#,##0.00"}]];
+  const ws2 = XLSX.utils.aoa_to_sheet(tot); ws2["!cols"] = [{wch: 34}, {wch: 12}, {wch: 14}];
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, "Documents"); XLSX.utils.book_append_sheet(wb, ws2, "Totals");
+  root.file("Overview.xlsx", XLSX.write(wb, {bookType: "xlsx", type: "array"}));
+  progress("Packing the ZIP…");
+  return zip.generateAsync({type: "blob", compression: "STORE"});
+}
+
+/* ---- calendar reminders ---- */
+const isWarranty = d => /warrant|garantie/i.test([d.category, d.title, d.notes, (d.tags || []).join(" ")].join(" "));
+const calTitle = d => `${isWarranty(d) ? "Warranty ends" : "Payment due"}: ${d.title || "document"}`;
+const calDetails = d => [d.sender && `From: ${d.sender}`, d.amount !== null && d.amount !== undefined && d.amount !== "" && `Amount: ${fmtAmount(d.amount, d.currency)}`,
+  d.reference && `Reference: ${d.reference}`, d.path && `File: OneDrive/${BASE}/${d.path}`].filter(Boolean).join("\n");
+const ymd = (iso, add = 0) => { const t = new Date(iso + "T12:00:00"); t.setDate(t.getDate() + add); return t.toISOString().slice(0, 10).replace(/-/g, ""); };
+const googleCalUrl = d => `https://calendar.google.com/calendar/render?action=TEMPLATE&text=${encodeURIComponent(calTitle(d))}&dates=${ymd(d.dueDate)}/${ymd(d.dueDate, 1)}&details=${encodeURIComponent(calDetails(d))}`;
+function icsFor(list) {
+  const e = t => String(t).replace(/\\/g, "\\\\").replace(/\n/g, "\\n").replace(/([,;])/g, "\\$1");
+  const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d+/, "");
+  const ev = list.map(d => ["BEGIN:VEVENT", `UID:dv-${d.id}@document-vault`, `DTSTAMP:${stamp}`, `DTSTART;VALUE=DATE:${ymd(d.dueDate)}`, `DTEND;VALUE=DATE:${ymd(d.dueDate, 1)}`,
+    `SUMMARY:${e(calTitle(d))}`, `DESCRIPTION:${e(calDetails(d))}`, "TRANSP:TRANSPARENT",
+    "BEGIN:VALARM", `TRIGGER:-P${isWarranty(d) ? 30 : 7}D`, "ACTION:DISPLAY", `DESCRIPTION:${e(calTitle(d))}`, "END:VALARM", "END:VEVENT"].join("\r\n"));
+  return new File([["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//van Straten//Document Vault//EN", "CALSCALE:GREGORIAN", ...ev, "END:VCALENDAR"].join("\r\n") + "\r\n"],
+    list.length === 1 ? `${safeSeg(calTitle(list[0]), 60)}.ics` : "Document Vault reminders.ics", {type: "text/calendar"});
+}
+async function icsOut(list, b) {
+  return busy(b, "Preparing…", async () => { const f = icsFor(list); if (bridge() || !canDownload()) return shareBlob(f, f.name); return saveBlob(f); });
+}
+
+/* ---- split, cut out, merge ---- */
+async function sourcePages(d, maxSide) {
+  const blob = await getFileBlob(d);
+  if (isPdfDoc(d)) {
+    const pdf = await openPdf(await blob.arrayBuffer()), out = [];
+    for (let i = 1; i <= Math.min(pdf.numPages, 60); i++) {
+      const page = await pdf.getPage(i); let text = "";
+      try { text = textFromContent(await page.getTextContent()); } catch {}
+      out.push({canvas: await pdfPageCanvas(pdf, i, maxSide), text});
+    }
+    pdf.destroy(); return out;
+  }
+  const bm = await createImageBitmap(blob, {imageOrientation: "from-image"});
+  return [{canvas: renderPage({bitmap: bm, rot: 0, crop: null}, "original", {enhance: false, maxSide: Math.max(maxSide, 2600)}), text: d.text || ""}];
+}
+async function openSplit(d) {
+  showPanel("Split or cut out", `<p class="hint">Loading pages…</p>`, {docId: d.id});
+  let pages;
+  try { pages = await sourcePages(d, 2400); } catch (e) { return toast(errText(e)); }
+  const cuts = pages.map((_, i) => i < pages.length - 1);
+  const thumbs = pages.map(p => scaled(p.canvas, 360).toDataURL("image/jpeg", .8));
+  let saved = 0;
+  const draw = () => {
+    const groups = cuts.filter(Boolean).length + 1;
+    showPanel("Split or cut out", `
+      ${pages.length > 1 && isPdfDoc(d) ? `<div class="card"><h3>Split into separate documents</h3>
+        <p class="hint">Tap the scissors between pages to choose where to cut.</p>
+        <div class="splitrow">${thumbs.map((t, i) => `<figure class="sthumb"><img src="${t}" alt="Page ${i + 1}"><figcaption>${i + 1}</figcaption></figure>${i < pages.length - 1 ? `<button class="iconbtn cutbtn${cuts[i] ? " on" : ""}" data-cut="${i}" aria-pressed="${cuts[i]}" aria-label="Cut after page ${i + 1}">✂</button>` : ""}`).join("")}</div>
+        <div class="btnrow"><button class="btn primary grow" data-act="dosplit" ${groups > 1 ? "" : "disabled"}>Split into ${groups} documents</button></div></div>` : ""}
+      <div class="card"><h3>Cut out parts of a page</h3>
+        <p class="hint">For one scan with several receipts: pick the page, draw a box around one receipt and save it as its own document. Repeat for the next one.</p>
+        <div class="splitrow">${thumbs.map((t, i) => `<button class="sthumb pick" data-pick="${i}" aria-label="Cut parts out of page ${i + 1}"><img src="${t}" alt=""><span>${i + 1}</span></button>`).join("")}</div>
+        ${saved ? `<p class="hint">${saved} part${saved > 1 ? "s" : ""} saved as new documents.</p>` : ""}</div>
+      <label class="toggle"><input type="checkbox" id="s_del" ${saved ? "checked" : ""}>Move the original to the OneDrive recycle bin when done</label>
+      <div class="btnrow"><button class="btn grow" data-act="done">Done</button></div>`, {docId: d.id});
+  };
+  draw();
+  const finish = async () => {
+    if ($("#s_del", panel)?.checked) { try { await deleteDoc(d); toast("Original moved to the recycle bin"); } catch (e) { toast(errText(e)); } }
+    closePanel();
+  };
+  panel.onclick = async e => {
+    const c = e.target.closest("[data-cut]"); if (c) { cuts[c.dataset.cut] = !cuts[c.dataset.cut]; return draw(); }
+    const pk = e.target.closest("[data-pick]"); if (pk) return cutOut(Number(pk.dataset.pick));
+    const b = e.target.closest("[data-act]"); if (!b) return;
+    if (b.dataset.act === "close") return openDetail(d.id);
+    if (b.dataset.act === "done") return finish();
+    if (b.dataset.act === "dosplit") {
+      const del = $("#s_del", panel).checked;
+      return busy(b, "Splitting…", async () => {
+        await loadScript("vendor/pdf-lib.min.js");
+        const {PDFDocument} = window.PDFLib;
+        const src = await PDFDocument.load(await (await getFileBlob(d)).arrayBuffer(), {ignoreEncryption: true});
+        const groups = [[]]; pages.forEach((_, i) => { groups.at(-1).push(i); if (cuts[i]) groups.push([]); });
+        const allEmpty = pages.every(p => !p.text.trim());
+        let k = 0;
+        for (const grp of groups) {
+          k++; b.textContent = `Saving part ${k} of ${groups.length}…`;
+          const nd = await PDFDocument.create();
+          for (const pg of await nd.copyPages(src, grp)) nd.addPage(pg);
+          const text = allEmpty ? (d.text || "") : grp.map(i => pages[i].text).join("\n\n").trim();
+          const g0 = guessFields(text);
+          await createDoc(new Blob([await nd.save()], {type: "application/pdf"}), {...inherit(d), title: `${d.title} (part ${k})`, text, textSource: d.textSource,
+            amount: g0.amount ?? null, reference: g0.reference || "", pages: grp.length, mime: "application/pdf", source: "split"});
+        }
+        if (del) { await deleteDoc(d); await tidyNames(); }
+        toast(`Split into ${groups.length} documents`); closePanel();
+      });
+    }
+  };
+  function cutOut(i) {
+    const src = pages[i].canvas;
+    const url = scaled(src, 1100).toDataURL("image/jpeg", .85);
+    let box = {x: .05, y: .05, w: .9, h: .4};
+    showPanel(`Cut out from page ${i + 1}`, `<p class="hint">Drag the box around one receipt or part, then save it.</p>
+      <div class="cropwrap" id="cw"><img src="${url}" alt="Page ${i + 1}" draggable="false"><div class="cropclip"><div class="cropbox" id="cb"></div></div>
+      <div id="hd" style="position:absolute"><span class="handle tl" data-h="tl"></span><span class="handle tr" data-h="tr"></span><span class="handle bl" data-h="bl"></span><span class="handle br" data-h="br"></span></div></div>
+      <div class="btnrow"><button class="btn primary grow" data-act="savepart">${ICON.check}Save this part as a new document</button><button class="btn grow" data-act="back">Back</button></div>`, {docId: d.id});
+    const cw = $("#cw", panel), cb = $("#cb", panel), hd = $("#hd", panel);
+    const place = () => { for (const el of [cb, hd]) { el.style.left = box.x * 100 + "%"; el.style.top = box.y * 100 + "%"; el.style.width = box.w * 100 + "%"; el.style.height = box.h * 100 + "%"; } };
+    place();
+    let drag = null;
+    cw.addEventListener("pointerdown", e => { const h = e.target.dataset.h || (e.target === cb ? "move" : null); if (!h) return; e.preventDefault(); cw.setPointerCapture(e.pointerId); drag = {h, sx: e.clientX, sy: e.clientY, b: {...box}}; });
+    cw.addEventListener("pointermove", e => {
+      if (!drag) return;
+      const r = cw.getBoundingClientRect(), dx = (e.clientX - drag.sx) / r.width, dy = (e.clientY - drag.sy) / r.height, b = drag.b, min = .05;
+      if (drag.h === "move") box = {...b, x: Math.min(1 - b.w, Math.max(0, b.x + dx)), y: Math.min(1 - b.h, Math.max(0, b.y + dy))};
+      else {
+        let x1 = b.x, y1 = b.y, x2 = b.x + b.w, y2 = b.y + b.h;
+        if (drag.h.includes("l")) x1 = Math.min(x2 - min, Math.max(0, b.x + dx));
+        if (drag.h.includes("r")) x2 = Math.max(x1 + min, Math.min(1, b.x + b.w + dx));
+        if (drag.h.includes("t")) y1 = Math.min(y2 - min, Math.max(0, b.y + dy));
+        if (drag.h.includes("b")) y2 = Math.max(y1 + min, Math.min(1, b.y + b.h + dy));
+        box = {x: x1, y: y1, w: x2 - x1, h: y2 - y1};
+      }
+      place();
+    });
+    const end = () => drag = null; cw.addEventListener("pointerup", end); cw.addEventListener("pointercancel", end);
+    panel.onclick = async e => {
+      const b = e.target.closest("[data-act]"); if (!b) return;
+      if (b.dataset.act === "close" || b.dataset.act === "back") { draw(); return rebind(); }
+      if (b.dataset.act === "savepart") return busy(b, "Reading the text…", async () => {
+        const c = document.createElement("canvas");
+        c.width = Math.max(1, Math.round(box.w * src.width)); c.height = Math.max(1, Math.round(box.h * src.height));
+        c.getContext("2d").drawImage(src, box.x * src.width, box.y * src.height, c.width, c.height, 0, 0, c.width, c.height);
+        const blob = await toBlob(c, .88);
+        let text = "", conf = null;
+        try { const r = await ocrCanvas(c); text = r.text; conf = r.conf; } catch {}
+        const g0 = guessFields(text); saved++;
+        const fields = {...inherit(d), title: `${d.title} (part ${saved})`, text, textSource: "ocr", ocrConf: conf, weak: isWeak(text, conf),
+          sender: d.sender || g0.sender || "", date: g0.date || d.date, amount: g0.amount ?? null, currency: g0.currency || d.currency || "EUR", reference: g0.reference || "",
+          pages: 1, mime: "application/pdf", source: "cut"};
+        b.textContent = "Saving…";
+        await createDoc(await buildScanPdf([blob], [text], fields), fields);
+        toast(`Part ${saved} saved`);
+        box = {x: .05, y: Math.min(.55, box.y + box.h), w: .9, h: .4}; place();
+      });
+    };
+  }
+  const handler = panel.onclick;
+  const rebind = () => { panel.onclick = handler; };
+}
+function openMerge(list) {
+  let order = [...list].sort((a, b) => docDate(a).localeCompare(docDate(b)));
+  const draw = () => showPanel("Merge into one document", `
+    <p class="hint">The documents are combined into one PDF in this order.</p>
+    <ol class="mergelist">${order.map((d, i) => `<li><span>${esc(d.title || "Untitled")}<small>${esc([d.sender, fmtDate(d.date)].filter(Boolean).join(" · "))}</small></span>
+      <button class="iconbtn" data-up="${i}" aria-label="Move up" ${i ? "" : "disabled"}>↑</button><button class="iconbtn" data-down="${i}" aria-label="Move down" ${i < order.length - 1 ? "" : "disabled"}>↓</button></li>`).join("")}</ol>
+    <div class="field"><label for="m_title">Title of the new document</label><input id="m_title" value="${esc(order[0].title || "")}"></div>
+    <label class="toggle"><input type="checkbox" id="m_del" checked>Move the ${order.length} originals to the OneDrive recycle bin</label>
+    <div class="btnrow"><button class="btn primary grow" data-act="domerge">Merge ${order.length} documents</button></div>`);
+  draw();
+  panel.onclick = async e => {
+    const u = e.target.closest("[data-up]"), dn = e.target.closest("[data-down]");
+    if (u) { const i = +u.dataset.up; [order[i - 1], order[i]] = [order[i], order[i - 1]]; return draw(); }
+    if (dn) { const i = +dn.dataset.down; [order[i + 1], order[i]] = [order[i], order[i + 1]]; return draw(); }
+    const b = e.target.closest("[data-act]"); if (!b) return;
+    if (b.dataset.act === "close") return closePanel();
+    if (b.dataset.act !== "domerge") return;
+    const title = $("#m_title", panel).value.trim() || order[0].title, del = $("#m_del", panel).checked;
+    return busy(b, "Merging…", async () => {
+      await loadScript("vendor/pdf-lib.min.js");
+      const {PDFDocument} = window.PDFLib;
+      const out = await PDFDocument.create();
+      for (let i = 0; i < order.length; i++) {
+        const d = order[i]; b.textContent = `Adding ${i + 1} of ${order.length}…`;
+        const blob = await getFileBlob(d);
+        if (isPdfDoc(d)) {
+          const src = await PDFDocument.load(await blob.arrayBuffer(), {ignoreEncryption: true});
+          for (const pg of await out.copyPages(src, src.getPageIndices())) out.addPage(pg);
+        } else {
+          let bytes = new Uint8Array(await blob.arrayBuffer()), img;
+          if (/png/.test(blob.type || d.mime || "")) img = await out.embedPng(bytes);
+          else {
+            if (!/jpe?g/.test(blob.type || d.mime || "")) { const bm = await createImageBitmap(blob); const c = document.createElement("canvas"); c.width = bm.width; c.height = bm.height; c.getContext("2d").drawImage(bm, 0, 0); bytes = new Uint8Array(await (await toBlob(c, .9)).arrayBuffer()); }
+            img = await out.embedJpg(bytes);
+          }
+          const land = img.width > img.height, W = land ? 841.89 : 595.28, H = land ? 595.28 : 841.89, m = 18, sc = Math.min((W - 2 * m) / img.width, (H - 2 * m) / img.height);
+          out.addPage([W, H]).drawImage(img, {x: (W - img.width * sc) / 2, y: (H - img.height * sc) / 2, width: img.width * sc, height: img.height * sc});
+        }
+      }
+      const first = order[0];
+      const fields = {...inherit(first), title, date: order.map(d => d.date).filter(Boolean).sort()[0] || "", amount: first.amount ?? null, currency: first.currency || "EUR",
+        reference: first.reference || "", dueDate: order.map(d => d.dueDate).filter(Boolean).sort()[0] || "",
+        text: order.map(d => d.text || "").join("\n\n").trim(), textSource: "merged", weak: order.some(d => d.weak),
+        tags: [...new Set(order.flatMap(d => d.tags || []))], notes: `Merged from: ${order.map(d => d.title).join("; ")}`.slice(0, 500),
+        pages: out.getPageCount(), mime: "application/pdf", source: "merge", filed: order.every(d => d.filed) ? first.filed : false};
+      const nd = await createDoc(new Blob([await out.save()], {type: "application/pdf"}), fields);
+      if (del) { for (const d of order) await deleteDoc(d); await tidyNames(); }
+      state.selecting = false; state.sel.clear();
+      toast("Merged into one document"); openDetail(nd.id);
+    });
+  };
 }
 async function rotateDocPage(d, index, btn) {
   btn.disabled = true; btn.classList.add("spin");
@@ -1502,9 +1841,12 @@ function openDetail(id, confirmDelete = false) {
       ${d.webUrl ? `<a class="btn grow" href="${esc(d.webUrl)}" target="_blank" rel="noopener">${ICON.open}Open in OneDrive</a>` : ""}
       <button class="btn grow" data-act="edit">Edit details</button>
       ${d.dueDate ? `<button class="btn grow" data-act="handled">${ICON.check}${d.handled ? "Mark as open" : "Mark as handled"}</button>` : ""}
+      ${d.dueDate ? `<button class="btn grow" data-act="cal">${ICON.cal}Add to calendar</button>` : ""}
+      <button class="btn grow" data-act="split">${ICON.crop}Split or cut out</button>
       <button class="btn grow" data-act="reocr">${ICON.text}Read text again</button>
       ${ai.on && !d.weak ? `<button class="btn grow" data-act="ai">${ICON.spark}Read with AI</button>` : ""}
     </div>
+    <div id="calbox"></div>
     ${confirmDelete ? `<div class="confirm"><span>Delete this document? The file moves to your OneDrive recycle bin.</span><button class="btn danger" data-act="delyes">Delete</button><button class="btn ghost" data-act="delno">Cancel</button></div>`
       : `<div class="btnrow"><button class="btn danger" data-act="delask">${ICON.trash}Delete</button></div>`}`, {docId: id});
   fillViewer(d, $("#viewer", panel), {rotate: true});
@@ -1520,13 +1862,21 @@ function openDetail(id, confirmDelete = false) {
     if (a === "delno") return openDetail(id, false);
     if (a === "delyes") {
       b.disabled = true;
-      try { await g("DELETE", `/me/drive/items/${d.itemId}`); } catch (err) { if (err.status !== 404) { b.disabled = false; return toast(errText(err)); } }
-      if (d.originalItemId) { try { await g("DELETE", `/me/drive/items/${d.originalItemId}`); } catch {} }
-      putDoc({id: d.id, deleted: true, createdAt: d.createdAt}); closePanel(); toast("Deleted. The file is in your OneDrive recycle bin."); return;
+      try { await deleteDoc(d); } catch (err) { b.disabled = false; return toast(errText(err)); }
+      closePanel(); toast("Deleted. The file is in your OneDrive recycle bin."); return;
     }
     if (a === "edit") return openEdit(d, {filing: !d.filed});
     if (a === "okfiled") { putDoc({...d, autoFiled: ""}); return openDetail(id); }
     if (a === "handled") { putDoc({...d, handled: !d.handled}); return openDetail(id); }
+    if (a === "split") return openSplit(d);
+    if (a === "ics") return icsOut([d], b);
+    if (a === "cal") {
+      const box = $("#calbox", panel);
+      box.innerHTML = box.innerHTML ? "" : `<div class="card"><h3>${esc(calTitle(d))} · ${esc(fmtDate(d.dueDate))}</h3>
+        <div class="btnrow"><a class="btn primary grow" href="${esc(googleCalUrl(d))}" target="_blank" rel="noopener">${ICON.cal}Google Calendar</a><button class="btn grow" data-act="ics">${ICON.download}Outlook or other (.ics)</button></div>
+        <p class="hint">The .ics file reminds you ${isWarranty(d) ? "30" : "7"} days before.</p></div>`;
+      return;
+    }
     if (a === "reocr" || a === "ai") return rereadDoc(d, b, a === "ai");
   };
 }
@@ -1611,12 +1961,21 @@ function openSettings() {
       <div class="field"><label for="s_model">Model</label><input id="s_model" class="mono" value="${esc(lsGet("dv.aiModel", "") || "")}" placeholder="claude-haiku-5-5"></div>
       <label class="toggle"><input type="checkbox" id="s_auto" ${ai.auto ? "checked" : ""}>Use AI automatically when a document is hard to read</label>
       <div class="btnrow"><button class="btn primary grow" data-act="saveai">Save</button>${ai.on ? `<button class="btn grow" data-act="clearai">Remove key</button>` : ""}</div></div>
+    <div class="card"><h3>Reminders</h3><p class="hint">Put every upcoming payment date and warranty end in your calendar at once. Open the file with Outlook, Google Calendar or your phone's calendar.</p>
+      <div class="btnrow"><button class="btn grow" data-act="allics">${ICON.cal}All upcoming dates (.ics)</button></div></div>
+    <div class="card"><h3>Export for your accountant</h3><p class="hint">Choose Business, a year and if you like a category in the main screen, then tap <b>Export these</b>. You get a ZIP with the files and an Excel overview with totals.</p></div>
     ${catBlock("private")}${catBlock("business")}
     <div class="card"><h3>About</h3><p class="hint">Document Vault keeps a copy of the index on this device so search also works offline. Saving and viewing files needs an internet connection.</p></div>`);
   panel.onclick = async e => {
     const b = e.target.closest("[data-act]"); if (!b) return;
     const a = b.dataset.act, sp = b.dataset.sp;
     if (a === "close") return closePanel();
+    if (a === "allics") {
+      const today = new Date().toISOString().slice(0, 10);
+      const list = docs().filter(d => d.dueDate && d.dueDate >= today && !d.handled);
+      if (!list.length) return toast("There are no upcoming dates.");
+      return icsOut(list, b);
+    }
     if (a === "openfolder") { try { const r = await g("GET", itemRef("")); window.open(r.webUrl, "_blank", "noopener"); } catch (err) { toast(errText(err)); } return; }
     if (a === "sync") { await refreshIndex(); scanInbox(); return toast(state.syncError ? "Sync failed. Check your connection." : "Up to date"); }
     if (a === "signout") { await idb.clear("kv"); await idb.clear("thumbs"); return msalApp.logoutRedirect({account, postLogoutRedirectUri: redirectUri()}); }
@@ -1657,7 +2016,28 @@ $("#chips").addEventListener("click", e => { const b = e.target.closest(".chip")
 let qTimer; $("#q").addEventListener("input", e => { clearTimeout(qTimer); qTimer = setTimeout(() => { state.q = e.target.value; render(); }, 120); });
 $("#list").addEventListener("click", e => {
   if (e.target.closest('[data-act="scan"]')) return startScan(true);
-  const b = e.target.closest(".doc"); if (b) openDetail(b.dataset.id);
+  const b = e.target.closest(".doc"); if (!b) return;
+  if (state.selecting) { const id = b.dataset.id; state.sel.has(id) ? state.sel.delete(id) : state.sel.add(id); return render(); }
+  openDetail(b.dataset.id);
+});
+$("#filterbar").addEventListener("change", e => {
+  if (e.target.id === "fYear") state.year = e.target.value;
+  if (e.target.id === "fAmt") state.amt = e.target.value;
+  render();
+});
+$("#filterbar").addEventListener("click", e => {
+  const b = e.target.closest("[data-act]"); if (!b) return;
+  if (b.dataset.act === "select") { state.selecting = !state.selecting; state.sel.clear(); return render(); }
+  if (b.dataset.act === "export") return openExport(filtered().list, exportLabel());
+});
+$("#selbar").addEventListener("click", e => {
+  const b = e.target.closest("[data-act]"); if (!b) return;
+  const a = b.dataset.act;
+  if (a === "selcancel") { state.selecting = false; state.sel.clear(); return render(); }
+  if (a === "selall") { for (const d of filtered().list) state.sel.add(d.id); return render(); }
+  const chosen = [...state.sel].map(getDoc).filter(Boolean);
+  if (a === "selexport") return openExport(chosen, `Selection ${new Date().toISOString().slice(0, 10)}`);
+  if (a === "merge") return openMerge(chosen);
 });
 $("#fab").addEventListener("click", () => startScan(true));
 $("#btnSettings").addEventListener("click", openSettings);

@@ -10,6 +10,11 @@ A personal document archive that runs in the browser on phone and PC and stores 
 - **Add files** on the PC by dropping PDFs or photos on the window, or by saving them into `OneDrive\Document Vault\Inbox`. The app picks those up automatically.
 - **Search everything**, including the text inside documents. PDFs with a text layer are read directly; photos and scans are read on your own device with OCR (Tesseract, Dutch + English).
 - **File** documents under Private or Business and a category. The file is renamed and moved in OneDrive to match, for example `Document Vault\Private\Purchases & Warranties\2025-03-14 Piet Fiets - Trek FX 3 bike.pdf` (date, sender, title).
+- **Find by year and amount:** type `2026 >500` or use the year and amount filters; the total of what you see is shown.
+- **Export for the accountant:** filter (for example Business, 2026) and tap *Export these*: a ZIP with the files per category plus `Overview.xlsx` with totals. A copy goes to `OneDrive\Document Vault\Exports`.
+- **Reminders:** add payment dates and warranty ends to Google Calendar or any calendar (.ics).
+- **Split, cut out and merge:** split a PDF into separate documents, cut single receipts out of one scan, or merge selected documents into one PDF.
+- **E-mails and screenshots:** add Outlook .msg or .eml files (attachments become their own documents) and paste screenshots with Ctrl+V.
 - **Learns from you:** a new document from a sender you filed before is filed the same way automatically.
 - **AI only as a fallback (optional):** if OCR is unsure (faded receipt, handwriting), the page can be sent to Claude with your own API key. Without a key everything else works.
 
