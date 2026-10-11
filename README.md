@@ -9,7 +9,7 @@ A personal document archive that runs in the browser on phone and PC and stores 
 - **Scan** letters, invoices, receipts and warranties with the phone camera (crop, rotate, enhance, multi-page). Scans are saved as PDF.
 - **Add files** on the PC by dropping PDFs or photos on the window, or by saving them into `OneDrive\Document Vault\Inbox`. The app picks those up automatically.
 - **Search everything**, including the text inside documents. PDFs with a text layer are read directly; photos and scans are read on your own device with OCR (Tesseract, Dutch + English).
-- **File** documents under Private or Business and a category. The file is renamed and moved in OneDrive to match, for example `Document Vault\Private\Purchases & Warranties\2025-03-14 Trek FX 3 bike, Piet Fiets.jpg`.
+- **File** documents under Private or Business and a category. The file is renamed and moved in OneDrive to match, for example `Document Vault\Private\Purchases & Warranties\2025-03-14 Piet Fiets - Trek FX 3 bike.pdf` (date, sender, title).
 - **Learns from you:** a new document from a sender you filed before is filed the same way automatically.
 - **AI only as a fallback (optional):** if OCR is unsure (faded receipt, handwriting), the page can be sent to Claude with your own API key. Without a key everything else works.
 

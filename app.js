@@ -565,7 +565,7 @@ function guessFields(text) {
   const ref = t.match(/(?:factuurnummer|factuurnr\.?|invoice (?:no|number)\.?|polisnummer|ordernummer|order (?:no|number)\.?|bonnummer)[:\s#]*([A-Z0-9][A-Z0-9\-/.]{2,24})/i);
   if (ref) g.reference = ref[1];
   const first = t.split("\n").map(s => s.trim()).find(s => /[a-z]{3,}/i.test(s) && s.length >= 3 && s.length <= 60);
-  if (first) g.sender = first.replace(/[|_~*]+/g, " ").trim();
+  if (first) g.sender = niceCase(first.replace(/[|_~*]+/g, " ").replace(/\s+/g, " ").trim());
   return g;
 }
 function suggestFromHistory(text, exceptId) {
@@ -767,7 +767,16 @@ function wireForm(f) {
   };
 }
 const folderOf = d => d.filed ? `${SPACE_LABEL[d.space]}/${safeSeg(d.category, 60)}` : INBOX;
-const fileNameOf = (d, ext) => `${d.date || "undated"} ${safeSeg(d.title, 80)}${ext}`;
+// "2025-03-14 Piet Fiets - Trek FX 3 bike.pdf": date, sender, title; sender left out when the title already names it
+const niceCase = s => /[a-z]/.test(s) ? s : String(s).toLowerCase().replace(/(^|[\s\-/&.(])(\p{L})/gu, (m, a, b) => a + b.toUpperCase());
+function fileNameOf(d, ext) {
+  const title = safeSeg(niceCase(d.title || ""), 70).replace(/\b\d{1,2} [A-Z][a-z]{2} \d{4}\b/g, "").replace(/[\s,;-]+$/, "").trim() || "Document";
+  const sender = d.sender ? niceCase(d.sender).replace(/[\\/:*?"<>|#%\u0000-\u001f]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 40).trim() : "";
+  const parts = [d.date || "undated"];
+  if (sender && !norm(title).includes(norm(sender))) parts.push(`${sender} -`);
+  parts.push(title);
+  return parts.join(" ") + ext;
+}
 const extOf = name => (String(name || "").match(/\.[a-z0-9]{2,5}$/i) || [".pdf"])[0].toLowerCase();
 
 /* ================= scan flow (phone camera) ================= */
@@ -855,7 +864,7 @@ async function readScan() {
 function showScanReview(r) {
   const guess = guessFields(r.text), hist = suggestFromHistory(r.text);
   const f = fieldsFrom({...guess, ...(hist || {}), ...(r.aiData ? Object.fromEntries(Object.entries(r.aiData).filter(([, v]) => v !== "" && v !== null)) : {}), text: r.text});
-  if (!f.title) f.title = [f.sender, f.date ? fmtDate(f.date) : ""].filter(Boolean).join(", ");
+  if (!f.title) f.title = f.sender || "Scanned document";
   if (!catsFor(f.space).includes(f.category)) f.category = catsFor(f.space).at(-1);
   const urls = r.blobs.map(b => URL.createObjectURL(b));
   showPanel("Check details", `
@@ -1214,6 +1223,17 @@ function openEdit(d, {filing = false, ai: aiData = null, note = ""} = {}) {
   };
 }
 
+/* bring file names and folders of filed documents in line with the naming rule */
+async function tidyNames() {
+  const todo = docs().filter(d => d.filed && d.itemId && d.name && (d.name !== fileNameOf(d, extOf(d.name)) || !String(d.path || "").startsWith(folderOf(d) + "/"))).slice(0, 40);
+  for (const d of todo) {
+    try {
+      const it = await moveItem(d.itemId, folderOf(d), fileNameOf(d, extOf(d.name)));
+      putDoc({...d, name: it.name, path: `${folderOf(d)}/${it.name}`, webUrl: it.webUrl || d.webUrl});
+    } catch (e) { console.warn("rename skipped", e); }
+  }
+}
+
 /* ================= settings ================= */
 function openSettings() {
   const catBlock = sp => `<div class="card"><h3>${SPACE_LABEL[sp]} categories</h3><div class="catlist">${catsFor(sp).map((c, i) => `<span class="catitem">${esc(c)}<button data-act="rmcat" data-sp="${sp}" data-i="${i}" aria-label="Remove ${esc(c)}">${ICON.x}</button></span>`).join("")}</div>
@@ -1316,7 +1336,7 @@ async function start() {
   render();
   await loadIndex();
   lastRefresh = Date.now();
-  if (!state.syncError) scanInbox();
+  if (!state.syncError) { await tidyNames(); scanInbox(); }
 }
 start();
 })();
