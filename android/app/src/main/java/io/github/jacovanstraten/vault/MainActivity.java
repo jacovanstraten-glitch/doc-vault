@@ -160,6 +160,15 @@ public class MainActivity extends Activity {
     /** Called from the web app: share a document (WhatsApp, e-mail, ...) or save it to Downloads. */
     private class Bridge {
         @JavascriptInterface
+        public int versionCode() {
+            try {
+                return (int) getPackageManager().getPackageInfo(getPackageName(), 0).getLongVersionCode();
+            } catch (Exception e) {
+                return 0;
+            }
+        }
+
+        @JavascriptInterface
         public void shareFile(String base64, String name, String mime, String title) {
             if (!trustedPage()) return;
             try {

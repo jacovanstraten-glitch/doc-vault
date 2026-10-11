@@ -577,7 +577,7 @@ function guessFields(text) {
   }
   g.amount = best ?? max;
   if (g.amount !== null && g.amount !== undefined) g.currency = /\$|usd/.test(low) && !/€|eur/.test(low) ? "USD" : /£|gbp/.test(low) ? "GBP" : /\betb\b|birr/.test(low) ? "ETB" : "EUR";
-  const ref = t.match(/(?:factuurnummer|factuurnr\.?|invoice (?:no|number)\.?|polisnummer|ordernummer|order (?:no|number)\.?|bonnummer)[:\s#]*([A-Z0-9][A-Z0-9\-/.]{2,24})/i);
+  const ref = t.match(/(?:factuurnummer|factuurnr\.?|invoice (?:no|number)\.?|polisnummer|ordernummer|order (?:no|number)\.?|bonnummer|booking ?code|booking reference|boekingscode|reserveringsnummer|dossiernummer)[:\s#]*([A-Z0-9][A-Z0-9\-/.]{2,24})/i);
   if (ref) g.reference = ref[1];
   const first = t.split("\n").map(s => s.trim()).find(s => /[a-z]{3,}/i.test(s) && s.length >= 3 && s.length <= 60);
   if (first) g.sender = niceCase(first.replace(/[|_~*]+/g, " ").replace(/\s+/g, " ").trim());
@@ -785,7 +785,8 @@ const folderOf = d => d.filed ? `${SPACE_LABEL[d.space]}/${safeSeg(d.category, 6
 // "2025-03-14 Piet Fiets - Trek FX 3 bike.pdf": date, sender, title; sender left out when the title already names it
 const niceCase = s => /[a-z]/.test(s) ? s : String(s).toLowerCase().replace(/(^|[\s\-/&.(])(\p{L})/gu, (m, a, b) => a + b.toUpperCase());
 function fileNameOf(d, ext) {
-  const title = safeSeg(niceCase(d.title || ""), 70).replace(/\b\d{1,2} [A-Z][a-z]{2} \d{4}\b/g, "").replace(/[\s,;-]+$/, "").trim() || "Document";
+  const cut = (t, n) => t.length <= n ? t : (t.slice(0, n).replace(/[\s,;:-]+\S*$/, "") || t.slice(0, n));
+  const title = cut(safeSeg(niceCase(d.title || ""), 200), 70).replace(/\b\d{1,2} [A-Z][a-z]{2} \d{4}\b/g, "").replace(/[\s,;-]+$/, "").trim() || "Document";
   const sender = d.sender ? niceCase(d.sender).replace(/[\\/:*?"<>|#%\u0000-\u001f]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 40).trim() : "";
   const parts = [d.date || "undated"];
   if (sender && !norm(title).includes(norm(sender))) parts.push(`${sender} -`);
@@ -973,11 +974,12 @@ async function openCrop(i) {
 /* ================= PC import: PDFs and images ================= */
 const queue = []; let queueRunning = false;
 const isPdfFile = f => f.type === "application/pdf" || /\.pdf$/i.test(f.name || "");
+const isMailFile = f => /\.(msg|eml)$/i.test(f.name || "") || f.type === "message/rfc822" || f.type === "application/vnd.ms-outlook";
 function enqueueFiles(files) {
-  const ok = files.filter(f => isPdfFile(f) || /^image\//.test(f.type));
-  if (files.length > ok.length) toast(`${files.length - ok.length} file${files.length - ok.length > 1 ? "s" : ""} skipped. Only PDF and image files can be added.`);
+  const ok = files.filter(f => isPdfFile(f) || isMailFile(f) || /^image\//.test(f.type));
+  if (files.length > ok.length) toast(`${files.length - ok.length} file${files.length - ok.length > 1 ? "s" : ""} skipped. Only PDF, image and e-mail files can be added.`);
   if (!ok.length) return;
-  const imgs = ok.filter(f => !isPdfFile(f));
+  const imgs = ok.filter(f => !isPdfFile(f) && !isMailFile(f));
   if (imgs.length >= 2) return askCombine(ok, imgs);
   for (const f of ok) queue.push({file: f, name: f.name || "Pasted image.png", status: "waiting", note: ""});
   renderImport(); runQueue();
@@ -993,11 +995,110 @@ $("#combineBox").addEventListener("click", e => {
   const b = e.target.closest("[data-act]"); if (!b || !pendingCombine) return;
   const {all, imgs} = pendingCombine; pendingCombine = null; $("#combineBox").innerHTML = "";
   if (b.dataset.act === "combine") {
-    for (const f of all) if (isPdfFile(f)) queue.push({file: f, name: f.name, status: "waiting", note: ""});
+    for (const f of all) if (isPdfFile(f) || isMailFile(f)) queue.push({file: f, name: f.name, status: "waiting", note: ""});
     queue.push({combine: imgs, name: `${imgs.length} photos as one document`, status: "waiting", note: ""});
   } else for (const f of all) queue.push({file: f, name: f.name || "Pasted image.png", status: "waiting", note: ""});
   renderImport(); runQueue();
 });
+/* ---- e-mails (.msg from Outlook, .eml) ---- */
+const winAnsi = t => String(t || "").normalize("NFKC").replace(/[\u2018\u2019]/g, "'").replace(/[\u201C\u201D]/g, '"').replace(/[\u2013\u2014]/g, "-").replace(/\u2026/g, "...")
+  .replace(/[^\x09\x0A\x0D\x20-\x7E\u00A0-\u00FF\u20AC]/g, " ");
+function cleanMailBody(t) {
+  return String(t || "").replace(/\r/g, "").replace(/<(https?:[^>\s]+\.(gif|png|jpe?g)(\?[^>]*)?)>/gi, "").replace(/<mailto:[^>]+>/gi, "")
+    .replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+function htmlToText(h) {
+  const d = new DOMParser().parseFromString(String(h || ""), "text/html");
+  d.querySelectorAll("script,style,head").forEach(n => n.remove());
+  d.querySelectorAll("br").forEach(n => n.replaceWith("\n"));
+  d.querySelectorAll("p,div,tr,li,h1,h2,h3,h4,table").forEach(n => n.append("\n"));
+  return (d.body ? d.body.textContent : "").replace(/\u00A0/g, " ");
+}
+async function parseMail(f, buf) {
+  await loadScript("vendor/vault-mail.min.js");
+  const {MsgReader, PostalMime} = window.VaultMail;
+  if (/\.msg$/i.test(f.name || "") || f.type === "application/vnd.ms-outlook") {
+    const r = new MsgReader(buf), d = r.getFileData();
+    if (d.error) throw {userMsg: "This Outlook e-mail could not be read."};
+    const atts = (d.attachments || []).filter(a => !a.attachmentHidden && a.fileName).map(a => {
+      const x = r.getAttachment(a);
+      return {name: x.fileName || a.fileName, type: a.attachMimeTag || "", data: x.content};
+    });
+    const date = d.messageDeliveryTime || d.clientSubmitTime || d.creationTime;
+    return {subject: d.subject || "", fromName: d.senderName || "", fromEmail: d.senderEmail || d.senderSmtpAddress || "",
+      to: (d.recipients || []).map(x => x.name || x.email).filter(Boolean).join(", "), date: date ? new Date(date) : null,
+      body: cleanMailBody(d.body || htmlToText(d.bodyHtml || "")), attachments: atts};
+  }
+  const m = await PostalMime.parse(buf);
+  return {subject: m.subject || "", fromName: m.from?.name || "", fromEmail: m.from?.address || "",
+    to: (m.to || []).map(x => x.name || x.address).join(", "), date: m.date ? new Date(m.date) : null,
+    body: cleanMailBody(m.text || htmlToText(m.html || "")),
+    attachments: (m.attachments || []).filter(a => a.disposition !== "inline" || /pdf/i.test(a.mimeType || "")).map(a => ({name: a.filename || "attachment", type: a.mimeType || "", data: new Uint8Array(a.content)}))};
+}
+async function mailPdf(mail, title) {
+  await loadScript("vendor/jspdf.umd.min.js");
+  const {jsPDF} = window.jspdf;
+  const pdf = new jsPDF({unit: "mm", format: "a4", compress: true});
+  const W = pdf.internal.pageSize.getWidth(), H = pdf.internal.pageSize.getHeight(), M = 18;
+  let y = M;
+  const line = (txt, size, style = "normal", gap = 1.5) => {
+    pdf.setFont("helvetica", style); pdf.setFontSize(size);
+    for (const l of pdf.splitTextToSize(winAnsi(txt), W - 2 * M)) {
+      if (y > H - M) { pdf.addPage(); y = M; }
+      pdf.text(l, M, y); y += size * 0.3528 * 1.35;
+    }
+    y += gap;
+  };
+  line(mail.subject || "(no subject)", 15, "bold", 3);
+  pdf.setTextColor(90);
+  line(`From: ${mail.fromName}${mail.fromEmail ? ` <${mail.fromEmail}>` : ""}`, 9.5, "normal", 0);
+  if (mail.to) line(`To: ${mail.to}`, 9.5, "normal", 0);
+  if (mail.date) line(`Date: ${mail.date.toLocaleString("en-GB", {dateStyle: "long", timeStyle: "short"})}`, 9.5, "normal", 0);
+  if (mail.attachments.length) line(`Attachments: ${mail.attachments.map(a => a.name).join(", ")}`, 9.5, "normal", 0);
+  pdf.setTextColor(0); y += 3; pdf.setDrawColor(200); pdf.line(M, y - 2, W - M, y - 2); y += 3;
+  line(mail.body || "(no text)", 10.5, "normal", 0);
+  pdf.setProperties({title, subject: mail.subject, author: mail.fromName, creator: "Document Vault"});
+  return pdf.output("blob");
+}
+async function importEmail(it, f, buf, hash) {
+  it.note = "Reading e-mail"; renderImport();
+  const mail = await parseMail(f, buf);
+  const iso = mail.date && !isNaN(mail.date) ? mail.date.toISOString().slice(0, 10) : "";
+  const text = [`Subject: ${mail.subject}`, `From: ${mail.fromName} ${mail.fromEmail}`, mail.to ? `To: ${mail.to}` : "", mail.attachments.length ? `Attachments: ${mail.attachments.map(a => a.name).join(", ")}` : "", "", mail.body].filter(x => x !== "").join("\n");
+  const guess = guessFields(mail.body), hist = suggestFromHistory(`${mail.fromName}\n${mail.fromEmail}\n${text}`);
+  const base = fieldsFrom({...guess, ...(hist || {}), title: mail.subject || "E-mail", sender: niceCase(mail.fromName || mail.fromEmail), date: iso || guess.date, text});
+  base.tags = [...new Set([...(base.tags || []), "e-mail"])];
+  if (mail.attachments.length) base.notes = `E-mail with ${mail.attachments.length} attachment${mail.attachments.length > 1 ? "s" : ""}: ${mail.attachments.map(a => a.name).join(", ")}.`;
+  const filed = !!hist;
+  if (!catsFor(base.space).includes(base.category)) base.category = catsFor(base.space).at(-1);
+  const meta = {id: uid(), ...base, filed, autoFiled: filed ? "history" : "", weak: false, textSource: "email", ocrConf: null,
+    pages: 1, hash, mime: "application/pdf", source: "email", originalName: f.name || "", createdAt: Date.now(), handled: false};
+  it.note = "Making a PDF of the e-mail"; renderImport();
+  const pdf = await mailPdf(mail, meta.title);
+  it.note = "Uploading to OneDrive"; renderImport();
+  const up = await uploadFile(folderOf(meta), fileNameOf(meta, ".pdf"), pdf);
+  Object.assign(meta, {itemId: up.id, name: up.name, path: `${folderOf(meta)}/${up.name}`, size: up.size, webUrl: up.webUrl, fileVersion: 1});
+  // keep the original e-mail file for Outlook
+  try {
+    const ext = /\.eml$/i.test(f.name || "") ? ".eml" : ".msg";
+    const oname = fileNameOf(meta, ext);
+    const orig = it.remote ? await moveItem(it.remote.id, "E-mail originals", oname) : await uploadFile("E-mail originals", oname, new Blob([buf], {type: f.type || "application/octet-stream"}));
+    meta.originalItemId = orig.id; meta.originalPath = `E-mail originals/${orig.name}`;
+  } catch (e) { console.warn("original e-mail not kept", e); }
+  putDoc(meta);
+  const parent = {title: meta.title, sender: meta.sender, date: meta.date, filed, space: meta.space, category: meta.category};
+  let added = 0;
+  for (const a of mail.attachments) {
+    const type = a.type || (/\.pdf$/i.test(a.name) ? "application/pdf" : /\.(jpe?g)$/i.test(a.name) ? "image/jpeg" : /\.png$/i.test(a.name) ? "image/png" : "");
+    const af = new File([a.data], a.name, {type});
+    if (!(isPdfFile(af) || /^image\//.test(type))) continue;
+    if (/^image\//.test(type) && a.data.length < 25000) continue; // logos and signatures
+    queue.push({file: af, name: `${a.name} (from e-mail)`, status: "waiting", note: "", parent}); added++;
+  }
+  it.status = "done"; it.docId = meta.id;
+  it.note = (filed ? `${SPACE_LABEL[meta.space]} · ${meta.category}` : "To file") + (added ? ` · ${added} attachment${added > 1 ? "s" : ""} next` : "");
+}
+
 async function importCombined(it) {
   const files = it.combine, blobs = [], texts = []; let cs = 0;
   const parts = [];
@@ -1073,7 +1174,7 @@ async function scanInbox() {
   try { list = await g("GET", `${itemRef(INBOX)}/children?$top=200&select=id,name,file,size,webUrl`); }
   catch (e) { return; }
   const known = new Set(docs().map(d => d.itemId)), queued = new Set(queue.map(q => q.remote && q.remote.id));
-  const fresh = (list.value || []).filter(x => x.file && !known.has(x.id) && !queued.has(x.id) && (isPdfFile({name: x.name, type: x.file.mimeType}) || /^image\//.test(x.file.mimeType || "")));
+  const fresh = (list.value || []).filter(x => x.file && !known.has(x.id) && !queued.has(x.id) && (isPdfFile({name: x.name, type: x.file.mimeType}) || isMailFile({name: x.name, type: x.file.mimeType}) || /^image\//.test(x.file.mimeType || "")));
   if (!fresh.length) return;
   for (const x of fresh) queue.push({remote: x, name: x.name, status: "waiting", note: ""});
   renderImport(); runQueue();
@@ -1090,6 +1191,7 @@ async function importOne(it) {
   const hash = await sha256(buf);
   const dup = hash && docs().find(d => d.hash === hash);
   if (dup) { it.status = "skipped"; it.note = "Already in your vault"; return; }
+  if (isMailFile(f)) return importEmail(it, f, buf, hash);
   const pdfFile = isPdfFile(f);
   let text = "", source = "", conf = null, pages = 1; const aiBlobs = [];
   const ocrTick = (i, n) => m => { if (m.status === "recognizing text") { it.note = `Reading text${n > 1 ? `, page ${i} of ${n}` : ""} · ${Math.round(m.progress * 100)}%`; renderImport(); } else if (/loading|initializing/.test(m.status)) { it.note = "Loading the text reader…"; renderImport(); } };
@@ -1128,9 +1230,16 @@ async function importOne(it) {
   const guess = guessFields(text), hist = suggestFromHistory(text);
   const base = fieldsFrom({...guess, ...(hist || {}), ...(aiData ? Object.fromEntries(Object.entries(aiData).filter(([, v]) => v !== "" && v !== null)) : {}), text});
   if (!base.title) base.title = (aiData && aiData.title) || f.name.replace(/\.[^.]+$/, "").replace(/[_]+/g, " ").trim();
-  const filed = !!(hist || (aiData && aiData.category));
+  const par = it.parent;
+  if (par) {
+    base.notes = `Attachment of the e-mail “${par.title}”${par.sender ? ` from ${par.sender}` : ""}${par.date ? `, ${fmtDate(par.date)}` : ""}.`;
+    base.tags = [...new Set([...(base.tags || []), "e-mail attachment"])];
+    if (!base.date) base.date = par.date;
+    if (!hist && par.filed) { base.space = par.space; base.category = par.category; }
+  }
+  const filed = !!(hist || (aiData && aiData.category) || (par && par.filed));
   if (!catsFor(base.space).includes(base.category)) base.category = catsFor(base.space).at(-1);
-  const meta = {id: uid(), ...base, filed, autoFiled: filed ? (hist ? "history" : "ai") : "", weak, textSource: source, ocrConf: conf,
+  const meta = {id: uid(), ...base, filed, autoFiled: filed ? (hist ? "history" : (aiData && aiData.category) ? "ai" : "email") : "", weak, textSource: source, ocrConf: conf,
     pages, hash, mime: f.type || (pdfFile ? "application/pdf" : "image/jpeg"), source: "import", originalName: f.name || "", createdAt: Date.now(), handled: false};
   const ext = pdfFile ? ".pdf" : (extOf(f.name) || ".jpg");
   let up;
@@ -1159,7 +1268,13 @@ $("#fileIn").addEventListener("change", e => { const f = [...e.target.files]; e.
   window.addEventListener("drop", e => { if (!hasFiles(e)) return; e.preventDefault(); depth = 0; ov.hidden = true; if (!$("#app").hidden) enqueueFiles([...e.dataTransfer.files]); });
   window.addEventListener("paste", e => {
     if ($("#app").hidden || (e.target.closest && e.target.closest("input,textarea"))) return;
-    const files = [...(e.clipboardData?.files || [])]; if (files.length) { e.preventDefault(); enqueueFiles(files); }
+    let files = [...(e.clipboardData?.files || [])];
+    if (!files.length) files = [...(e.clipboardData?.items || [])].filter(i => i.kind === "file").map(i => i.getAsFile()).filter(Boolean);
+    if (!files.length) return;
+    e.preventDefault();
+    const stamp = new Date().toLocaleString("sv-SE").slice(0, 16).replace(":", ".");
+    enqueueFiles(files.map((f, i) => /^image\//.test(f.type) && (!f.name || /^image\.\w+$/i.test(f.name))
+      ? new File([f], `Screenshot ${stamp}${files.length > 1 ? ` (${i + 1})` : ""}.${(f.type.split("/")[1] || "png").replace("jpeg", "jpg")}`, {type: f.type}) : f));
   });
 }
 const nextToFile = (except) => docs().filter(d => !d.filed && d.id !== except).sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0))[0]?.id;
@@ -1235,6 +1350,23 @@ window.vaultBack = () => {
   if (!panel.hidden) { const b = panel.querySelector('.phead [data-act="close"]'); if (b) { b.click(); return true; } }
   return false;
 };
+
+/* ================= Android app updates ================= */
+const APK_URL = "https://github.com/jacovanstraten-glitch/doc-vault/releases/latest/download/DocumentVault.apk";
+async function checkAndroidUpdate() {
+  const isApp = /; wv\)/.test(navigator.userAgent) || !!window.VaultAndroid;
+  if (!isApp) return;
+  let installed = 0;
+  try { installed = window.VaultAndroid && window.VaultAndroid.versionCode ? Number(window.VaultAndroid.versionCode()) : 0; } catch {}
+  let latest = 0;
+  try {
+    const r = await fetch("https://api.github.com/repos/jacovanstraten-glitch/doc-vault/releases/latest", {cache: "no-store"});
+    if (r.ok) latest = Number(((await r.json()).tag_name || "").replace(/\D+/g, "")) || 0;
+  } catch {}
+  if (latest && installed < latest) {
+    $("#notice").innerHTML = `<div class="notice update"><span>A new version of the Document Vault app is ready${installed ? "" : ", with sharing and saving to Downloads"}.</span><a class="btn primary" href="${APK_URL}">Install update</a></div>`;
+  }
+}
 
 /* ================= download, share, rotate ================= */
 const bridge = () => (window.VaultAndroid && typeof window.VaultAndroid.shareFile === "function") ? window.VaultAndroid : null;
@@ -1353,7 +1485,7 @@ function openDetail(id, confirmDelete = false) {
   const row = (k, v) => v ? `<dt>${k}</dt><dd>${v}</dd>` : "";
   showPanel(d.title || "Untitled", `
     ${!d.filed ? `<div class="flag weak">${ICON.inbox}<span>This document is not filed yet.</span><button class="btn" data-act="edit">File it</button></div>` : ""}
-    ${d.autoFiled ? `<div class="flag info">${ICON.check}<span>Filed automatically${d.autoFiled === "history" ? " based on earlier documents from this sender" : " by AI"}.</span><button class="btn" data-act="okfiled">Looks good</button></div>` : ""}
+    ${d.autoFiled ? `<div class="flag info">${ICON.check}<span>Filed automatically${d.autoFiled === "history" ? " based on earlier documents from this sender" : d.autoFiled === "email" ? " like the e-mail it came with" : " by AI"}.</span><button class="btn" data-act="okfiled">Looks good</button></div>` : ""}
     ${d.weak ? `<div class="flag weak">${ICON.text}<span>The text was hard to read, so search may miss this document.</span>${ai.on ? `<button class="btn" data-act="ai">${ICON.spark}Read with AI</button>` : `<button class="btn" data-act="edit">Add key words</button>`}</div>` : ""}
     <div class="viewer" id="viewer"><span class="loading">Loading from OneDrive…</span></div>
     <div class="tags">${d.filed ? `<span class="pill ${d.space}">${SPACE_LABEL[d.space]}</span><span class="cat">${esc(d.category)}</span>` : ""}${due ? `<span class="due">${due.label}</span>` : ""}${d.handled && d.dueDate ? `<span class="cat">Handled</span>` : ""}</div>
@@ -1361,7 +1493,7 @@ function openDetail(id, confirmDelete = false) {
       ${row("Date", esc(fmtDate(d.date)))}${row("From", highlight(d.sender || "", terms))}${row("Amount", amt ? `<span class="mono">${esc(amt)}</span>` : "")}
       ${row("Due / ends", esc(fmtDate(d.dueDate)))}${row("Reference", d.reference ? `<span class="mono">${highlight(d.reference, terms)}</span>` : "")}
       ${row("Tags", esc((d.tags || []).join(", ")))}${row("Notes", d.notes ? highlight(d.notes, terms) : "")}${row("Pages", String(d.pages || 1))}
-      ${row("OneDrive", `<span class="mono">${esc(BASE)}/${esc(d.path || "")}</span>`)}${row("Text from", esc({pdf: "PDF text", ocr: `Text recognition${d.ocrConf ? ` (${d.ocrConf}% sure)` : ""}`, ai: "AI", manual: "Typed"}[d.textSource] || ""))}
+      ${row("OneDrive", `<span class="mono">${esc(BASE)}/${esc(d.path || "")}</span>`)}${row("Text from", esc({email: "E-mail", pdf: "PDF text", ocr: `Text recognition${d.ocrConf ? ` (${d.ocrConf}% sure)` : ""}`, ai: "AI", manual: "Typed"}[d.textSource] || ""))}
     </dl>
     ${d.text ? `<details${terms.length ? " open" : ""}><summary>Text in the document</summary><div class="ocr">${highlight(d.text, terms)}</div></details>` : ""}
     <div class="btnrow">
@@ -1389,6 +1521,7 @@ function openDetail(id, confirmDelete = false) {
     if (a === "delyes") {
       b.disabled = true;
       try { await g("DELETE", `/me/drive/items/${d.itemId}`); } catch (err) { if (err.status !== 404) { b.disabled = false; return toast(errText(err)); } }
+      if (d.originalItemId) { try { await g("DELETE", `/me/drive/items/${d.originalItemId}`); } catch {} }
       putDoc({id: d.id, deleted: true, createdAt: d.createdAt}); closePanel(); toast("Deleted. The file is in your OneDrive recycle bin."); return;
     }
     if (a === "edit") return openEdit(d, {filing: !d.filed});
@@ -1566,6 +1699,7 @@ async function start() {
   await loadIndex();
   lastRefresh = Date.now();
   if (!state.syncError) { await tidyNames(); scanInbox(); }
+  checkAndroidUpdate();
 }
 start();
 })();
