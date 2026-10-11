@@ -1,3 +1,10 @@
+@font-face{font-family:"Figtree";font-style:normal;font-weight:400;font-display:swap;src:url("vendor/fonts/figtree-latin-400-normal.woff2") format("woff2")}
+@font-face{font-family:"Figtree";font-style:normal;font-weight:500;font-display:swap;src:url("vendor/fonts/figtree-latin-500-normal.woff2") format("woff2")}
+@font-face{font-family:"Figtree";font-style:normal;font-weight:600;font-display:swap;src:url("vendor/fonts/figtree-latin-600-normal.woff2") format("woff2")}
+@font-face{font-family:"Bricolage Grotesque";font-style:normal;font-weight:600;font-display:swap;src:url("vendor/fonts/bricolage-grotesque-latin-600-normal.woff2") format("woff2")}
+@font-face{font-family:"Bricolage Grotesque";font-style:normal;font-weight:700;font-display:swap;src:url("vendor/fonts/bricolage-grotesque-latin-700-normal.woff2") format("woff2")}
+@font-face{font-family:"IBM Plex Mono";font-style:normal;font-weight:400;font-display:swap;src:url("vendor/fonts/ibm-plex-mono-latin-400-normal.woff2") format("woff2")}
+@font-face{font-family:"IBM Plex Mono";font-style:normal;font-weight:500;font-display:swap;src:url("vendor/fonts/ibm-plex-mono-latin-500-normal.woff2") format("woff2")}
 /* Layout: one-column app on the phone, wider single list on the PC. Sticky header (spaces + search),
    filter chips, month-grouped list, floating Scan button, full-screen panels for scan / detail / settings. */
 :root{

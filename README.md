@@ -13,6 +13,14 @@ A personal document archive that runs in the browser on phone and PC and stores 
 - **Learns from you:** a new document from a sender you filed before is filed the same way automatically.
 - **AI only as a fallback (optional):** if OCR is unsure (faded receipt, handwriting), the page can be sent to Claude with your own API key. Without a key everything else works.
 
+## Security
+
+- The app is a static web page: there is no server of ours. Your files go directly between your device and your OneDrive.
+- All code, including libraries, OCR engine, language data and fonts, is served from this repository. A Content-Security-Policy blocks scripts from anywhere else.
+- Sign-in is Microsoft's own (MSAL). The app never sees your password. Tokens are stored in the browser on your device.
+- Access can be revoked at any time at https://account.live.com/consent/Manage.
+- Protect the two accounts this depends on with two-step verification: your Microsoft account (your documents) and your GitHub account (the app code).
+
 ## Where your data lives
 
 | What | Where |
@@ -32,6 +40,10 @@ The code in this repository contains no personal data and no secrets. The client
 
 On first sign-in Microsoft asks once to allow access to your OneDrive files. The app only reads and writes inside the `Document Vault` folder.
 
+## Open on the PC
+
+Double-click `pc/Document Vault.bat`. It opens the app in its own Chrome window (Edge if Chrome is not installed). Put a copy on your desktop or wherever you keep your other app launchers.
+
 ## Install on the phone
 
 Open the link in Chrome on Android → menu → **Add to Home screen** (or **Install app**).
@@ -42,4 +54,4 @@ All AI code is in one function, `aiRead()` in `app.js`. To use another provider,
 
 ## Libraries (bundled in `vendor/`)
 
-MSAL.js 3.28.1 (Microsoft sign-in), PDF.js 3.11.174, jsPDF 2.5.1, Tesseract.js 5.1.1 (the OCR engine and language data load from jsDelivr on first use and are then cached).
+MSAL.js 3.28.1 (Microsoft sign-in), PDF.js 3.11.174, jsPDF 2.5.1, Tesseract.js 5.1.1 with its OCR engine and Dutch + English language data, and the fonts. Everything is served from this repository; the app loads no code from other websites.

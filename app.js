@@ -433,6 +433,8 @@ async function getOcr() {
     await loadScript("vendor/tesseract.min.js");
     ocrWorker = Tesseract.createWorker(["nld", "eng"], 1, {
       workerPath: abs("vendor/tesseract-worker.min.js"),
+      corePath: abs("vendor/tesseract-core/"),
+      langPath: abs("vendor/tessdata"),
       logger: m => { if (ocrProgress && m && m.status) ocrProgress(m); }
     }).catch(e => { ocrWorker = null; throw e; });
   }
