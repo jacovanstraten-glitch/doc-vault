@@ -26,6 +26,8 @@ const ICON = {
   open:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 4h6v6M20 4l-9 9"/><path d="M19 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h5"/></svg>',
   x:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg>',
   check:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5 9-10"/></svg>',
+  share:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="m8.6 13.5 6.8 4M15.4 6.5l-6.8 4"/></svg>',
+  download:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v12M7 11l5 5 5-5"/><path d="M4 20h16"/></svg>',
   inbox:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 13h5l1 3h6l1-3h5"/><path d="M5 5h14l2 8v6H3v-6z"/></svg>'
 };
 
@@ -193,6 +195,19 @@ async function uploadFile(folder, name, blob, {replace = false, ifMatch = null} 
   const s = await g("POST", `${itemRef(p)}/createUploadSession`, {body: {item: {"@microsoft.graph.conflictBehavior": ifMatch ? "replace" : cb}}, headers});
   const CH = 320 * 1024 * 10; // 3.2 MB, a multiple of 320 KiB
   let res = null;
+  for (let start = 0; start < blob.size; start += CH) {
+    const end = Math.min(blob.size, start + CH);
+    const r = await fetch(s.uploadUrl, {method: "PUT", headers: {"Content-Range": `bytes ${start}-${end - 1}/${blob.size}`}, body: blob.slice(start, end)});
+    if (!r.ok && r.status !== 202) throw new GraphError(r.status, "Upload failed.", "upload");
+    if (r.status === 200 || r.status === 201) res = await r.json();
+  }
+  return res;
+}
+async function replaceContent(itemId, blob) {
+  if (blob.size <= 3.5 * 1024 * 1024)
+    return g("PUT", `/me/drive/items/${itemId}/content`, {body: blob, headers: {"Content-Type": blob.type || "application/octet-stream"}});
+  const s = await g("POST", `/me/drive/items/${itemId}/createUploadSession`, {body: {item: {"@microsoft.graph.conflictBehavior": "replace"}}});
+  const CH = 320 * 1024 * 10; let res = null;
   for (let start = 0; start < blob.size; start += CH) {
     const end = Math.min(blob.size, start + CH);
     const r = await fetch(s.uploadUrl, {method: "PUT", headers: {"Content-Range": `bytes ${start}-${end - 1}/${blob.size}`}, body: blob.slice(start, end)});
@@ -785,8 +800,9 @@ function startScan(openCamera) {
   draft = {pages: [], mode: "enhanced"}; renderScan();
   if (openCamera) $("#camIn").click();
 }
-async function addScanFiles(files) {
+async function addScanFiles(files, fromCamera = false) {
   if (!draft) return;
+  draft.justAdded = fromCamera && files.length > 0;
   for (const f of files) {
     try {
       const bitmap = await createImageBitmap(f, {imageOrientation: "from-image"});
@@ -801,7 +817,7 @@ async function refreshPreview(p) {
   if (p.preview) URL.revokeObjectURL(p.preview);
   p.preview = URL.createObjectURL(b);
 }
-$("#camIn").addEventListener("change", e => { const f = [...e.target.files]; e.target.value = ""; addScanFiles(f); });
+$("#camIn").addEventListener("change", e => { const f = [...e.target.files]; e.target.value = ""; addScanFiles(f, true); });
 $("#galIn").addEventListener("change", e => { const f = [...e.target.files]; e.target.value = ""; addScanFiles(f); });
 
 function renderScan() {
@@ -810,12 +826,15 @@ function renderScan() {
       <button class="iconbtn" data-act="rot" data-i="${i}" aria-label="Rotate page ${i + 1}">${ICON.rotate}</button>
       <button class="iconbtn" data-act="crop" data-i="${i}" aria-label="Crop page ${i + 1}">${ICON.crop}</button>
       <button class="iconbtn" data-act="del" data-i="${i}" aria-label="Remove page ${i + 1}">${ICON.trash}</button></div></div></div>`).join("");
+  const ask = n && draft.justAdded;
   showPanel("New scan", `
-    ${n ? `<div class="pages">${pagesHtml}</div>` : `<div class="card"><p class="hint">Take a photo of each page. Lay the document flat in good light and fill the frame.</p></div>`}
-    <div class="btnrow"><button class="btn grow" data-act="cam">${ICON.camera}${n ? "Add page" : "Take photo"}</button><button class="btn grow" data-act="gal">${ICON.image}From gallery</button></div>
+    ${ask ? `<div class="card nextpage"><h3>Page ${n} added. Does the document have more pages?</h3>
+      <div class="btnrow"><button class="btn primary grow" data-act="cam">${ICON.camera}Scan page ${n + 1}</button><button class="btn grow" data-act="donepages">${ICON.check}No, that's all</button></div></div>` : ""}
+    ${n ? `<div class="pages">${pagesHtml}</div>` : `<div class="card"><p class="hint">Take a photo of each page. Lay the document flat in good light and fill the frame. You can add more pages after the first one.</p></div>`}
+    ${ask ? "" : `<div class="btnrow"><button class="btn grow" data-act="cam">${ICON.camera}${n ? "Add page" : "Take photo"}</button><button class="btn grow" data-act="gal">${ICON.image}From gallery</button></div>`}
     ${n ? `<div class="field"><span class="label">Image style</span><div class="seg" id="modeSeg">
         ${[["original", "Original"], ["enhanced", "Enhanced"], ["bw", "Black & white"]].map(([k, l]) => `<button data-mode="${k}" aria-pressed="${draft.mode === k}">${l}</button>`).join("")}</div></div>
-      <div class="btnrow"><button class="btn primary grow" data-act="read">${ICON.text}Read text and continue</button></div>
+      ${ask ? "" : `<div class="btnrow"><button class="btn primary grow" data-act="read">${ICON.text}Read text and continue (${n} page${n > 1 ? "s" : ""})</button></div>`}
       <p class="hint">The text is read on this phone. ${ai.on && ai.auto ? "If a page is hard to read, it is sent to AI for a second try." : ""}</p>` : ""}`);
   panel.onclick = onScanClick;
 }
@@ -826,6 +845,8 @@ async function onScanClick(e) {
   if (act === "close") { draft = null; return closePanel(); }
   if (act === "cam") return $("#camIn").click();
   if (act === "gal") return $("#galIn").click();
+  if (act === "donepages") { draft.justAdded = false; return renderScan(); }
+  draft.justAdded = false;
   if (act === "rot") { const p = draft.pages[i]; p.rot = (p.rot + 90) % 360; p.crop = null; await refreshPreview(p); return renderScan(); }
   if (act === "del") { const p = draft.pages.splice(i, 1)[0]; if (p.preview) URL.revokeObjectURL(p.preview); return renderScan(); }
   if (act === "crop") return openCrop(i);
@@ -956,8 +977,64 @@ function enqueueFiles(files) {
   const ok = files.filter(f => isPdfFile(f) || /^image\//.test(f.type));
   if (files.length > ok.length) toast(`${files.length - ok.length} file${files.length - ok.length > 1 ? "s" : ""} skipped. Only PDF and image files can be added.`);
   if (!ok.length) return;
+  const imgs = ok.filter(f => !isPdfFile(f));
+  if (imgs.length >= 2) return askCombine(ok, imgs);
   for (const f of ok) queue.push({file: f, name: f.name || "Pasted image.png", status: "waiting", note: ""});
   renderImport(); runQueue();
+}
+let pendingCombine = null;
+function askCombine(all, imgs) {
+  pendingCombine = {all, imgs};
+  $("#combineBox").innerHTML = `<div class="card nextpage"><h3>${imgs.length} photos selected. Are they pages of one document?</h3>
+    <div class="btnrow"><button class="btn primary grow" data-act="combine">${ICON.text}Yes, one document of ${imgs.length} pages</button><button class="btn grow" data-act="separate">No, ${imgs.length} separate documents</button></div></div>`;
+  $("#combineBox").scrollIntoView({block: "nearest"});
+}
+$("#combineBox").addEventListener("click", e => {
+  const b = e.target.closest("[data-act]"); if (!b || !pendingCombine) return;
+  const {all, imgs} = pendingCombine; pendingCombine = null; $("#combineBox").innerHTML = "";
+  if (b.dataset.act === "combine") {
+    for (const f of all) if (isPdfFile(f)) queue.push({file: f, name: f.name, status: "waiting", note: ""});
+    queue.push({combine: imgs, name: `${imgs.length} photos as one document`, status: "waiting", note: ""});
+  } else for (const f of all) queue.push({file: f, name: f.name || "Pasted image.png", status: "waiting", note: ""});
+  renderImport(); runQueue();
+});
+async function importCombined(it) {
+  const files = it.combine, blobs = [], texts = []; let cs = 0;
+  const parts = [];
+  for (let i = 0; i < files.length; i++) {
+    const buf = await files[i].arrayBuffer(); parts.push(new Uint8Array(buf));
+    let bm;
+    try { bm = await createImageBitmap(new Blob([buf], {type: files[i].type}), {imageOrientation: "from-image"}); }
+    catch { throw {userMsg: `${files[i].name} could not be opened.`}; }
+    const c = renderPage({bitmap: bm, rot: 0, crop: null}, "original", {enhance: false, maxSide: 2200});
+    blobs.push(await toBlob(c, .82));
+    ocrProgress = m => { if (m.status === "recognizing text") { it.note = `Reading text, page ${i + 1} of ${files.length} · ${Math.round(m.progress * 100)}%`; renderImport(); } };
+    const r = await ocrCanvas(c); texts.push(r.text); cs += r.conf;
+  }
+  ocrProgress = null;
+  const all = new Uint8Array(parts.reduce((n, p) => n + p.length, 0)); let o = 0; for (const p of parts) { all.set(p, o); o += p.length; }
+  const hash = await sha256(all.buffer);
+  if (hash && docs().find(d => d.hash === hash)) { it.status = "skipped"; it.note = "Already in your vault"; return; }
+  let text = texts.join("\n\n").trim(), conf = Math.round(cs / files.length), source = "ocr", weak = isWeak(text, conf), aiData = null;
+  if (weak && ai.on && ai.auto) {
+    it.note = "Hard to read, asking AI"; renderImport();
+    try { aiData = await aiRead(blobs); text = aiData.text || text; source = "ai"; weak = false; } catch {}
+  }
+  const guess = guessFields(text), hist = suggestFromHistory(text);
+  const base = fieldsFrom({...guess, ...(hist || {}), ...(aiData ? Object.fromEntries(Object.entries(aiData).filter(([, v]) => v !== "" && v !== null)) : {}), text});
+  if (!base.title) base.title = base.sender || files[0].name.replace(/\.[^.]+$/, "");
+  const filed = !!(hist || (aiData && aiData.category));
+  if (!catsFor(base.space).includes(base.category)) base.category = catsFor(base.space).at(-1);
+  const meta = {id: uid(), ...base, filed, autoFiled: filed ? (hist ? "history" : "ai") : "", weak, textSource: source, ocrConf: conf,
+    pages: files.length, hash, mime: "application/pdf", source: "import", originalName: files.map(f => f.name).join(", ").slice(0, 200), createdAt: Date.now(), handled: false};
+  it.note = "Making the PDF"; renderImport();
+  const pdf = await buildScanPdf(blobs, source === "ai" ? [text] : texts, meta);
+  it.note = "Uploading to OneDrive"; renderImport();
+  const up = await uploadFile(folderOf(meta), fileNameOf(meta, ".pdf"), pdf);
+  Object.assign(meta, {itemId: up.id, name: up.name, path: `${folderOf(meta)}/${up.name}`, size: up.size, webUrl: up.webUrl, fileVersion: 1});
+  putDoc(meta);
+  it.status = "done"; it.docId = meta.id;
+  it.note = filed ? `${SPACE_LABEL[meta.space]} · ${meta.category}` : "To file";
 }
 async function runQueue() {
   if (queueRunning) return; queueRunning = true;
@@ -965,7 +1042,7 @@ async function runQueue() {
     it.status = "working"; it.note = "Opening"; renderImport();
     try { await importOne(it); }
     catch (e) { console.error(e); it.status = "failed"; it.note = errText(e); }
-    it.file = null; ocrProgress = null; renderImport();
+    it.file = null; it.combine = null; ocrProgress = null; renderImport();
   }
   queueRunning = false; renderImport();
 }
@@ -1002,6 +1079,7 @@ async function scanInbox() {
   renderImport(); runQueue();
 }
 async function importOne(it) {
+  if (it.combine) return importCombined(it);
   let f = it.file;
   if (it.remote) {
     it.note = "Downloading from OneDrive"; renderImport();
@@ -1086,6 +1164,143 @@ $("#fileIn").addEventListener("change", e => { const f = [...e.target.files]; e.
 }
 const nextToFile = (except) => docs().filter(d => !d.filed && d.id !== except).sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0))[0]?.id;
 
+/* ================= zoom ================= */
+let zoomEl = null;
+function closeZoom() { if (zoomEl) { zoomEl.remove(); zoomEl = null; } }
+function openZoom(src) {
+  closeZoom();
+  const ov = document.createElement("div"); ov.className = "zoomov"; zoomEl = ov;
+  ov.innerHTML = `<img alt="Zoomed page" draggable="false"><button class="iconbtn zoomclose" aria-label="Close">${ICON.x}</button><span class="zoomhint">Pinch, scroll or double-tap to zoom</span>`;
+  const img = ov.querySelector("img"); img.src = src;
+  document.body.appendChild(ov);
+  let s = 1, x = 0, y = 0, start = null, lastTap = 0;
+  const pts = new Map();
+  const apply = () => { img.style.transform = `translate(${x}px, ${y}px) scale(${s})`; };
+  const zoomAt = (cx, cy, ns) => {
+    ns = Math.min(8, Math.max(1, ns));
+    const ox = cx - window.innerWidth / 2, oy = cy - window.innerHeight / 2;
+    x = ox - (ox - x) * (ns / s); y = oy - (oy - y) * (ns / s); s = ns;
+    if (s === 1) { x = 0; y = 0; }
+    apply();
+  };
+  const snapshot = () => ({s, x, y, pts: new Map([...pts].map(([k, v]) => [k, {...v}]))});
+  ov.addEventListener("pointerdown", e => {
+    if (e.target.closest(".zoomclose")) return;
+    ov.setPointerCapture(e.pointerId); pts.set(e.pointerId, {x: e.clientX, y: e.clientY}); start = snapshot();
+  });
+  ov.addEventListener("pointermove", e => {
+    if (!pts.has(e.pointerId) || !start) return;
+    pts.set(e.pointerId, {x: e.clientX, y: e.clientY});
+    const now = [...pts.values()], was = [...start.pts.values()];
+    if (now.length === 1 && was.length === 1) { x = start.x + now[0].x - was[0].x; y = start.y + now[0].y - was[0].y; apply(); }
+    else if (now.length >= 2 && was.length >= 2) {
+      const d = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+      const mid = (a, b) => ({x: (a.x + b.x) / 2, y: (a.y + b.y) / 2});
+      const m0 = mid(was[0], was[1]), m1 = mid(now[0], now[1]);
+      s = start.s; x = start.x + m1.x - m0.x; y = start.y + m1.y - m0.y;
+      zoomAt(m1.x, m1.y, start.s * d(now[0], now[1]) / Math.max(1, d(was[0], was[1])));
+    }
+  });
+  const up = e => {
+    const p0 = start && start.pts.get(e.pointerId), p1 = pts.get(e.pointerId);
+    pts.delete(e.pointerId); start = pts.size ? snapshot() : null;
+    if (p0 && p1 && !pts.size && Math.hypot(p1.x - p0.x, p1.y - p0.y) < 8) {
+      const t = Date.now();
+      if (t - lastTap < 300) { zoomAt(p1.x, p1.y, s > 1 ? 1 : 2.5); lastTap = 0; } else lastTap = t;
+    }
+  };
+  ov.addEventListener("pointerup", up); ov.addEventListener("pointercancel", up);
+  ov.addEventListener("wheel", e => { e.preventDefault(); zoomAt(e.clientX, e.clientY, s * Math.exp(-e.deltaY / 300)); }, {passive: false});
+  ov.querySelector(".zoomclose").addEventListener("click", closeZoom);
+  return img;
+}
+panel.addEventListener("click", async e => {
+  const t = e.target.closest(".viewer img, .viewer canvas, .pg img");
+  if (!t || e.target.closest("[data-rot]")) return;
+  e.stopPropagation();
+  const img = openZoom(t.tagName === "CANVAS" ? t.toDataURL("image/jpeg", .92) : t.src);
+  const fig = t.closest(".vpage"), d = panel.dataset.docId && getDoc(panel.dataset.docId);
+  if (t.tagName === "CANVAS" && fig && d && isPdfDoc(d)) {
+    try {
+      const pdf = await openPdf(await (await getFileBlob(d)).arrayBuffer());
+      const c = await pdfPageCanvas(pdf, Number(fig.dataset.page) + 1, 3200); pdf.destroy();
+      if (img.isConnected) img.src = URL.createObjectURL(await toBlob(c, .9));
+    } catch {}
+  }
+}, true);
+document.addEventListener("keydown", e => { if (e.key === "Escape" && zoomEl) closeZoom(); });
+// Used by the Android app's back button: close zoom, then an open screen.
+window.vaultBack = () => {
+  if (zoomEl) { closeZoom(); return true; }
+  if (!panel.hidden) { const b = panel.querySelector('.phead [data-act="close"]'); if (b) { b.click(); return true; } }
+  return false;
+};
+
+/* ================= download, share, rotate ================= */
+const bridge = () => (window.VaultAndroid && typeof window.VaultAndroid.shareFile === "function") ? window.VaultAndroid : null;
+const inOldAndroidApp = () => !bridge() && /; wv\)/.test(navigator.userAgent);
+const canDownload = () => !!bridge() || !inOldAndroidApp();
+function canShare() {
+  if (bridge()) return true;
+  try { return !!(navigator.canShare && navigator.canShare({files: [new File(["x"], "x.pdf", {type: "application/pdf"})]})); } catch { return false; }
+}
+async function docFile(d) {
+  const blob = await getFileBlob(d);
+  const name = d.name || fileNameOf(d, isPdfDoc(d) ? ".pdf" : ".jpg");
+  return new File([blob], name, {type: d.mime || blob.type || "application/octet-stream"});
+}
+async function busy(b, label, fn) {
+  const old = b.innerHTML; b.disabled = true; b.textContent = label;
+  try { await fn(); } catch (e) { if (!(e && e.name === "AbortError")) { console.error(e); toast(e.userMsg || errText(e)); } }
+  finally { b.disabled = false; b.innerHTML = old; }
+}
+function downloadDoc(d, b) {
+  return busy(b, "Preparing…", async () => {
+    const f = await docFile(d), br = bridge();
+    if (br) { br.saveFile(await blobToB64(f), f.name, f.type); return; }
+    const u = URL.createObjectURL(f), a = document.createElement("a");
+    a.href = u; a.download = f.name; document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(u), 30000);
+  });
+}
+function shareDoc(d, b) {
+  return busy(b, "Preparing…", async () => {
+    const f = await docFile(d), br = bridge();
+    if (br) { br.shareFile(await blobToB64(f), f.name, f.type, d.title || f.name); return; }
+    await navigator.share({files: [f], title: d.title || f.name});
+  });
+}
+async function rotateDocPage(d, index, btn) {
+  btn.disabled = true; btn.classList.add("spin");
+  try {
+    const blob = await getFileBlob(d);
+    let out;
+    if (isPdfDoc(d)) {
+      await loadScript("vendor/pdf-lib.min.js");
+      const {PDFDocument, degrees} = window.PDFLib;
+      const doc = await PDFDocument.load(await blob.arrayBuffer(), {ignoreEncryption: true});
+      const page = doc.getPages()[index];
+      page.setRotation(degrees(((page.getRotation().angle || 0) + 90) % 360));
+      out = new Blob([await doc.save()], {type: "application/pdf"});
+    } else {
+      const bm = await createImageBitmap(blob, {imageOrientation: "from-image"});
+      const c = document.createElement("canvas"); c.width = bm.height; c.height = bm.width;
+      const ctx = c.getContext("2d"); ctx.translate(c.width / 2, c.height / 2); ctx.rotate(Math.PI / 2); ctx.drawImage(bm, -bm.width / 2, -bm.height / 2);
+      const type = /png/.test(d.mime || "") ? "image/png" : "image/jpeg";
+      out = await new Promise(r => c.toBlob(r, type, .9));
+    }
+    const it = await replaceContent(d.itemId, out);
+    const v = (d.fileVersion || 1) + 1;
+    fileCache.set(d.itemId + ":" + v, out);
+    putDoc({...d, fileVersion: v, size: it && it.size || out.size});
+    openDetail(d.id);
+    toast("Page rotated");
+  } catch (e) {
+    console.error(e); btn.disabled = false; btn.classList.remove("spin");
+    toast(e && e.message && /encrypt/i.test(e.message) ? "This PDF is protected and cannot be rotated." : errText(e));
+  }
+}
+
 /* ================= document detail ================= */
 const fileCache = new Map();
 async function getFileBlob(d) {
@@ -1095,19 +1310,27 @@ async function getFileBlob(d) {
   fileCache.set(k, b); if (fileCache.size > 6) fileCache.delete(fileCache.keys().next().value);
   return b;
 }
-async function fillViewer(d, el) {
+const isPdfDoc = d => (d.mime || "").includes("pdf") || /\.pdf$/i.test(d.name || "");
+function pageWrap(node, i, canRotate) {
+  const w = document.createElement("figure"); w.className = "vpage"; w.dataset.page = i;
+  w.appendChild(node);
+  if (canRotate) w.insertAdjacentHTML("beforeend", `<button class="iconbtn rotbtn" data-rot="${i}" aria-label="Rotate page ${i + 1}" title="Rotate page">${ICON.rotate}</button>`);
+  return w;
+}
+async function fillViewer(d, el, {rotate = false} = {}) {
   try {
     const blob = await getFileBlob(d);
     if (!el.isConnected) return;
-    if ((d.mime || "").includes("pdf") || /\.pdf$/i.test(d.name || "")) {
+    if (isPdfDoc(d)) {
       const pdf = await openPdf(await blob.arrayBuffer());
       el.innerHTML = "";
       const n = Math.min(pdf.numPages, 15);
-      for (let i = 1; i <= n; i++) { if (!el.isConnected) break; const c = await pdfPageCanvas(pdf, i, 1500); c.setAttribute("aria-label", `Page ${i}`); el.appendChild(c); }
+      for (let i = 1; i <= n; i++) { if (!el.isConnected) break; const c = await pdfPageCanvas(pdf, i, 1500); c.setAttribute("aria-label", `Page ${i}`); el.appendChild(pageWrap(c, i - 1, rotate)); }
       if (pdf.numPages > n && el.isConnected) el.insertAdjacentHTML("beforeend", `<span class="loading">${pdf.numPages - n} more pages. Open the file to see all.</span>`);
       pdf.destroy();
     } else {
-      const u = URL.createObjectURL(blob); el.innerHTML = `<img src="${u}" alt="Document">`;
+      const img = new Image(); img.src = URL.createObjectURL(blob); img.alt = "Document";
+      el.innerHTML = ""; el.appendChild(pageWrap(img, 0, rotate));
     }
   } catch (e) { if (el.isConnected) el.innerHTML = `<span class="loading">${esc(e.code === "offline" ? "Connect to the internet to view this file." : "The file could not be loaded from OneDrive.")}</span>`; }
 }
@@ -1142,6 +1365,8 @@ function openDetail(id, confirmDelete = false) {
     </dl>
     ${d.text ? `<details${terms.length ? " open" : ""}><summary>Text in the document</summary><div class="ocr">${highlight(d.text, terms)}</div></details>` : ""}
     <div class="btnrow">
+      ${canShare() ? `<button class="btn primary grow" data-act="share">${ICON.share}Share</button>` : ""}
+      ${canDownload() ? `<button class="btn grow" data-act="download">${ICON.download}Download</button>` : ""}
       ${d.webUrl ? `<a class="btn grow" href="${esc(d.webUrl)}" target="_blank" rel="noopener">${ICON.open}Open in OneDrive</a>` : ""}
       <button class="btn grow" data-act="edit">Edit details</button>
       ${d.dueDate ? `<button class="btn grow" data-act="handled">${ICON.check}${d.handled ? "Mark as open" : "Mark as handled"}</button>` : ""}
@@ -1150,11 +1375,15 @@ function openDetail(id, confirmDelete = false) {
     </div>
     ${confirmDelete ? `<div class="confirm"><span>Delete this document? The file moves to your OneDrive recycle bin.</span><button class="btn danger" data-act="delyes">Delete</button><button class="btn ghost" data-act="delno">Cancel</button></div>`
       : `<div class="btnrow"><button class="btn danger" data-act="delask">${ICON.trash}Delete</button></div>`}`, {docId: id});
-  fillViewer(d, $("#viewer", panel));
+  fillViewer(d, $("#viewer", panel), {rotate: true});
   panel.onclick = async e => {
+    const rb = e.target.closest("[data-rot]");
+    if (rb) return rotateDocPage(d, Number(rb.dataset.rot), rb);
     const b = e.target.closest("[data-act]"); if (!b) return;
     const a = b.dataset.act;
     if (a === "close") return closePanel();
+    if (a === "download") return downloadDoc(d, b);
+    if (a === "share") return shareDoc(d, b);
     if (a === "delask") return openDetail(id, true);
     if (a === "delno") return openDetail(id, false);
     if (a === "delyes") {

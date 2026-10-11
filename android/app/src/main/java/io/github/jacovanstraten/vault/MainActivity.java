@@ -3,12 +3,15 @@ package io.github.jacovanstraten.vault;
 import android.app.Activity;
 import android.content.ActivityNotFoundException;
 import android.content.ClipData;
+import android.content.ContentValues;
 import android.content.Intent;
 import android.graphics.Color;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.provider.MediaStore;
+import android.util.Base64;
+import android.webkit.JavascriptInterface;
 import android.view.View;
 import android.view.WindowInsets;
 import android.webkit.CookieManager;
@@ -24,6 +27,8 @@ import android.widget.Toast;
 import androidx.core.content.FileProvider;
 
 import java.io.File;
+import java.io.FileOutputStream;
+import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -41,6 +46,7 @@ public class MainActivity extends Activity {
     private WebView web;
     private ValueCallback<Uri[]> fileCallback;
     private Uri cameraUri;
+    private volatile String currentUrl = "";
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -79,7 +85,15 @@ public class MainActivity extends Activity {
         cookies.setAcceptCookie(true);
         cookies.setAcceptThirdPartyCookies(web, true);
 
+        web.addJavascriptInterface(new Bridge(), "VaultAndroid");
+        cleanShared();
+
         web.setWebViewClient(new WebViewClient() {
+            @Override
+            public void doUpdateVisitedHistory(WebView view, String url, boolean isReload) {
+                currentUrl = url == null ? "" : url;
+            }
+
             @Override
             public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
                 Uri u = request.getUrl();
@@ -121,6 +135,72 @@ public class MainActivity extends Activity {
             startActivity(new Intent(Intent.ACTION_VIEW, u));
         } catch (ActivityNotFoundException e) {
             Toast.makeText(this, "No app found to open this link.", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    /** Only the Document Vault pages may use the share and save functions. */
+    private boolean trustedPage() {
+        Uri u = Uri.parse(currentUrl);
+        return "https".equals(u.getScheme()) && APP_HOST.equals(u.getHost())
+                && u.getPath() != null && u.getPath().startsWith(APP_PATH);
+    }
+
+    private static String cleanName(String name) {
+        String n = name == null ? "document" : name.replaceAll("[\\\\/:*?\"<>|]", " ").trim();
+        return n.isEmpty() ? "document" : n;
+    }
+
+    private void cleanShared() {
+        File dir = new File(getCacheDir(), "shared");
+        File[] old = dir.listFiles();
+        if (old != null) for (File f : old) //noinspection ResultOfMethodCallIgnored
+            f.delete();
+    }
+
+    /** Called from the web app: share a document (WhatsApp, e-mail, ...) or save it to Downloads. */
+    private class Bridge {
+        @JavascriptInterface
+        public void shareFile(String base64, String name, String mime, String title) {
+            if (!trustedPage()) return;
+            try {
+                File dir = new File(getCacheDir(), "shared");
+                //noinspection ResultOfMethodCallIgnored
+                dir.mkdirs();
+                File f = new File(dir, cleanName(name));
+                try (FileOutputStream out = new FileOutputStream(f)) {
+                    out.write(Base64.decode(base64, Base64.DEFAULT));
+                }
+                Uri uri = FileProvider.getUriForFile(MainActivity.this, getPackageName() + ".files", f);
+                Intent send = new Intent(Intent.ACTION_SEND);
+                send.setType(mime == null || mime.isEmpty() ? "application/octet-stream" : mime);
+                send.putExtra(Intent.EXTRA_STREAM, uri);
+                send.putExtra(Intent.EXTRA_SUBJECT, title);
+                send.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                Intent chooser = Intent.createChooser(send, "Share document");
+                runOnUiThread(() -> startActivity(chooser));
+            } catch (Exception e) {
+                runOnUiThread(() -> Toast.makeText(MainActivity.this, "Could not share this document.", Toast.LENGTH_SHORT).show());
+            }
+        }
+
+        @JavascriptInterface
+        public void saveFile(String base64, String name, String mime) {
+            if (!trustedPage()) return;
+            try {
+                if (Build.VERSION.SDK_INT < 29) throw new IllegalStateException("old android");
+                ContentValues v = new ContentValues();
+                v.put(MediaStore.Downloads.DISPLAY_NAME, cleanName(name));
+                v.put(MediaStore.Downloads.MIME_TYPE, mime);
+                Uri uri = getContentResolver().insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, v);
+                if (uri == null) throw new IllegalStateException("no uri");
+                try (OutputStream out = getContentResolver().openOutputStream(uri)) {
+                    if (out == null) throw new IllegalStateException("no stream");
+                    out.write(Base64.decode(base64, Base64.DEFAULT));
+                }
+                runOnUiThread(() -> Toast.makeText(MainActivity.this, "Saved to Downloads", Toast.LENGTH_SHORT).show());
+            } catch (Exception e) {
+                runOnUiThread(() -> Toast.makeText(MainActivity.this, "Could not save this document.", Toast.LENGTH_SHORT).show());
+            }
         }
     }
 
@@ -197,7 +277,8 @@ public class MainActivity extends Activity {
     /** Back closes an open panel in the app first, then goes back, then leaves the app. */
     @Override
     public void onBackPressed() {
-        String js = "(function(){var p=document.getElementById('panel');"
+        String js = "(function(){if(window.vaultBack){return !!window.vaultBack();}"
+                + "var p=document.getElementById('panel');"
                 + "if(p&&!p.hidden){var b=p.querySelector('[data-act=\"close\"]');if(b){b.click();return true;}}"
                 + "return false;})()";
         web.evaluateJavascript(js, handled -> {
