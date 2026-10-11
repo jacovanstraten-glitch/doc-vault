@@ -339,7 +339,9 @@ function applyEnhance(ctx, w, h, mode) {
   const step = Math.max(1, Math.floor((w * h) / 200000)); let count = 0;
   for (let i = 0; i < d.length; i += 4 * step) { hist[(d[i] * .299 + d[i + 1] * .587 + d[i + 2] * .114) | 0]++; count++; }
   const pct = p => { let acc = 0; const t = count * p; for (let v = 0; v < 256; v++) { acc += hist[v]; if (acc >= t) return v; } return 255; };
-  const lo = pct(mode === "bw" ? .04 : .015), hi = Math.max(lo + 30, pct(mode === "bw" ? .80 : .985));
+  // paper -> white, ink -> black; never stretch a nearly uniform page
+  const hi = pct(mode === "bw" ? .80 : .97), lo = Math.min(pct(mode === "bw" ? .04 : .01), 110, hi - 60);
+  if (hi - lo < 60) return;
   const lut = new Uint8ClampedArray(256);
   for (let v = 0; v < 256; v++) { const x = Math.min(1, Math.max(0, (v - lo) / (hi - lo))); lut[v] = Math.round(255 * Math.pow(x, mode === "bw" ? 1.15 : 1)); }
   if (mode === "bw") for (let i = 0; i < d.length; i += 4) { const gg = lut[(d[i] * .299 + d[i + 1] * .587 + d[i + 2] * .114) | 0]; d[i] = d[i + 1] = d[i + 2] = gg; }
@@ -413,11 +415,12 @@ async function buildScanPdf(pageBlobs, pageTexts, meta) {
   await loadScript("vendor/jspdf.umd.min.js");
   const {jsPDF} = window.jspdf; let pdf = null;
   for (let i = 0; i < pageBlobs.length; i++) {
-    const url = URL.createObjectURL(pageBlobs[i]); const img = await loadImg(url); URL.revokeObjectURL(url);
-    const w = img.naturalWidth, h = img.naturalHeight, o = w > h ? "l" : "p";
+    const bytes = new Uint8Array(await pageBlobs[i].arrayBuffer());
+    const bm = await createImageBitmap(pageBlobs[i]);
+    const w = bm.width, h = bm.height, o = w > h ? "l" : "p"; bm.close && bm.close();
     if (!pdf) pdf = new jsPDF({orientation: o, unit: "mm", format: "a4", compress: true}); else pdf.addPage("a4", o);
     const pw = pdf.internal.pageSize.getWidth(), ph = pdf.internal.pageSize.getHeight(), m = 6, s = Math.min((pw - 2 * m) / w, (ph - 2 * m) / h);
-    pdf.addImage(img, "JPEG", (pw - w * s) / 2, (ph - h * s) / 2, w * s, h * s);
+    pdf.addImage(bytes, "JPEG", (pw - w * s) / 2, (ph - h * s) / 2, w * s, h * s, undefined, "NONE");
     const t = (pageTexts[i] || "").replace(/[^\x09\x0A\x0D\x20-\x7E -ÿ€]/g, " ").trim();
     if (t) { try { pdf.setFontSize(4); const lines = pdf.splitTextToSize(t, pw - 10); pdf.text(lines.slice(0, Math.floor((ph - 10) / 1.6)), 5, 6, {renderingMode: "invisible", lineHeightFactor: 1.1}); } catch {} }
   }
@@ -891,7 +894,8 @@ function errText(e) {
   if (e && e.code === "offline") return "You are offline. Connect to the internet and try again.";
   if (e && e.status === 507) return "Your OneDrive is full.";
   if (e && (e.status === 401 || e.status === 403)) return "OneDrive refused access. Sign out and in again in Settings.";
-  return "Saving failed. Check your connection and try again.";
+  const detail = e && (e.message || e.code || e.status);
+  return "Saving failed" + (detail ? `: ${String(detail).slice(0, 140)}` : ". Try again.");
 }
 
 /* crop */
