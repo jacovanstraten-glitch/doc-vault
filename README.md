@@ -44,7 +44,13 @@ On first sign-in Microsoft asks once to allow access to your OneDrive files. The
 
 Double-click `pc/Document Vault.bat`. It opens the app in its own Chrome window (Edge if Chrome is not installed). Put a copy on your desktop or wherever you keep your other app launchers.
 
-## Install on the phone
+## Android app
+
+`android/` holds a small Android app that shows Document Vault full screen, with camera and file access. GitHub Actions builds and signs it on every change and publishes it as a release.
+
+Install or update on the phone: open https://github.com/jacovanstraten-glitch/doc-vault/releases/latest/download/DocumentVault.apk and install the file. The signing key `android/release.jks` is encrypted; its password is the repository secret `KS_PASSWORD`.
+
+## Install on the phone (browser)
 
 Open the link in Chrome on Android → menu → **Add to Home screen** (or **Install app**).
 
