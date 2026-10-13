@@ -136,23 +136,30 @@ const redirectUri = () => location.origin + location.pathname.replace(/index\.ht
 async function initAuth() {
   msalApp = new msal.PublicClientApplication({
     auth: {clientId: clientId(), authority: "https://login.microsoftonline.com/consumers", redirectUri: redirectUri(), navigateToLoginRequestUrl: false},
-    cache: {cacheLocation: "localStorage"}
+    cache: {cacheLocation: "localStorage"},
+    system: {iframeHashTimeout: 8000}
   });
   await msalApp.initialize();
   const res = await msalApp.handleRedirectPromise();
   account = (res && res.account) || msalApp.getAllAccounts()[0] || null;
   return account;
 }
+// Silent renewal first; when Microsoft wants you to sign in again, go there (safe moments) or ask (while busy).
+async function signInAgain() {
+  await msalApp.acquireTokenRedirect({scopes: SCOPES, account, loginHint: account && account.username});
+  await new Promise(() => {}); // page navigates away
+}
 async function getToken() {
   try {
     const r = await msalApp.acquireTokenSilent({scopes: SCOPES, account});
     return r.accessToken;
   } catch (e) {
-    if (e instanceof msal.InteractionRequiredAuthError || /interaction_required|login_required|consent_required|no_tokens_found/i.test(String(e && e.errorCode))) {
-      await msalApp.acquireTokenRedirect({scopes: SCOPES, account});
-      await new Promise(() => {}); // page navigates away
-    }
-    throw e;
+    console.warn("Silent sign-in failed", e);
+    const busyNow = queueRunning || (typeof draft !== "undefined" && draft) || state.dirty;
+    if (!busyNow) return signInAgain();
+    $("#notice").innerHTML = `<div class="notice update"><span>Your Microsoft sign-in needs to be renewed. Your work so far is kept on this device.</span><button class="btn primary" id="reauth">Sign in again</button></div>`;
+    $("#reauth").onclick = () => signInAgain();
+    throw new GraphError(401, "Sign in again to continue.", "reauth");
   }
 }
 
@@ -332,8 +339,8 @@ async function saveIndex() {
 }
 function syncFailed(e) {
   console.error(e);
-  state.syncError = e && e.code === "offline" ? "offline" : "error";
-  setSync(state.syncError === "offline" ? "Offline" : "Sync error", true);
+  state.syncError = e && e.code === "offline" ? "offline" : e && e.code === "reauth" ? "reauth" : "error";
+  setSync({offline: "Offline", reauth: "Sign in again"}[state.syncError] || "Sync error", true);
 }
 function setSync(t, err = false) { const s = $("#sync"); if (s) { s.textContent = t; s.classList.toggle("err", err); } }
 let csvTimer;
@@ -973,6 +980,7 @@ function errText(e) {
   if (e && e.userMsg) return e.userMsg;
   if (e && e.code === "offline") return "You are offline. Connect to the internet and try again.";
   if (e && e.status === 507) return "Your OneDrive is full.";
+  if (e && e.code === "reauth") return "Your Microsoft sign-in needs to be renewed. Tap Sign in again at the top.";
   if (e && (e.status === 401 || e.status === 403)) return "OneDrive refused access. Sign out and in again in Settings.";
   const detail = e && (e.message || e.code || e.status);
   return "Saving failed" + (detail ? `: ${String(detail).slice(0, 140)}` : ". Try again.");
