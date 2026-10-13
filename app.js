@@ -26,6 +26,7 @@ const ICON = {
   open:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 4h6v6M20 4l-9 9"/><path d="M19 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h5"/></svg>',
   x:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg>',
   check:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5 9-10"/></svg>',
+  mail:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/></svg>',
   cal:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/></svg>',
   share:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="m8.6 13.5 6.8 4M15.4 6.5l-6.8 4"/></svg>',
   download:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v12M7 11l5 5 5-5"/><path d="M4 20h16"/></svg>',
@@ -744,7 +745,7 @@ function renderSelBar() {
   $("#fab").hidden = state.selecting;
   if (!state.selecting) { bar.hidden = true; return; }
   bar.hidden = false;
-  bar.innerHTML = `<span><b>${n}</b> selected</span><button class="btn" data-act="selall">Select all shown</button><button class="btn primary" data-act="merge" ${n >= 2 ? "" : "disabled"}>Merge into one</button><button class="btn" data-act="selexport" ${n ? "" : "disabled"}>${ICON.download}Export</button><button class="btn ghost" data-act="selcancel">Cancel</button>`;
+  bar.innerHTML = `<span><b>${n}</b> selected</span><button class="btn" data-act="selall">Select all shown</button><button class="btn primary" data-act="merge" ${n >= 2 ? "" : "disabled"}>Merge into one</button><button class="btn" data-act="selexport" ${n ? "" : "disabled"}>${ICON.download}Export</button>${!bridge() && canDownload() ? `<button class="btn" data-act="selmail" ${n ? "" : "disabled"}>${ICON.mail}E-mail</button>` : ""}<button class="btn ghost" data-act="selcancel">Cancel</button>`;
 }
 
 /* thumbnails from OneDrive, cached on this device */
@@ -1458,6 +1459,62 @@ async function shareBlob(f, title) {
 function downloadDoc(d, b) { return busy(b, "Preparing…", async () => saveBlob(await docFile(d))); }
 function shareDoc(d, b) { return busy(b, "Preparing…", async () => shareBlob(await docFile(d), d.title)); }
 
+/* ---- e-mail: a draft with attachments (.eml for Outlook) or OneDrive links ---- */
+const b64utf8 = t => btoa(String.fromCharCode(...new TextEncoder().encode(t)));
+async function b64lines(blob) { return (await blobToB64(blob)).replace(/.{1,76}/g, "$&\r\n"); }
+async function emlDraft(subject, body, files) {
+  const bd = "dv-" + uid();
+  const parts = [
+    "X-Unsent: 1", `Subject: =?UTF-8?B?${b64utf8(subject)}?=`, "MIME-Version: 1.0", `Content-Type: multipart/mixed; boundary="${bd}"`, "",
+    `--${bd}`, "Content-Type: text/plain; charset=utf-8", "Content-Transfer-Encoding: base64", "", b64utf8(body).replace(/.{1,76}/g, "$&\r\n")];
+  for (const f of files) {
+    const ascii = f.name.replace(/[^\x20-\x7E]/g, "_").replace(/"/g, "'");
+    parts.push(`--${bd}`, `Content-Type: ${f.type || "application/octet-stream"}; name="${ascii}"`, "Content-Transfer-Encoding: base64",
+      `Content-Disposition: attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(f.name)}`, "", await b64lines(f));
+  }
+  parts.push(`--${bd}--`, "");
+  return new File([parts.join("\r\n")], `${safeSeg(subject, 60)}.eml`, {type: "message/rfc822"});
+}
+async function shareLink(itemId) {
+  const r = await g("POST", `/me/drive/items/${itemId}/createLink`, {body: {type: "view", scope: "anonymous"}});
+  return r.link.webUrl;
+}
+// items: [{title, itemId, getFile: async () => File, size}]
+function openEmail(items, subject, back) {
+  const total = items.reduce((n, i) => n + (i.size || 0), 0), big = total > 20 * 1024 * 1024;
+  const mb = total > 102400 ? ` (${(total / 1048576).toFixed(total > 10485760 ? 0 : 1)} MB)` : "";
+  showPanel("Send by e-mail", `
+    <div class="card"><h3>Attach to an e-mail${mb}</h3>
+      <p class="hint">Downloads a ready e-mail with ${items.length > 1 ? `the ${items.length} files` : "the file"} attached. Open it and Outlook shows a new e-mail: add the address and press Send.${big ? " <b>This is larger than most mail services accept (about 20 MB); a link works better.</b>" : ""}</p>
+      <div class="btnrow"><button class="btn primary grow" data-act="eml">${ICON.download}Make e-mail with attachment</button></div></div>
+    ${items.some(i => !i.itemId) ? "" : `<div class="card"><h3>Send a link</h3>
+      <p class="hint">Creates a OneDrive link and opens your e-mail program with the link in the text. Anyone with the link can view the file; you can remove the link later in OneDrive under Manage access.</p>
+      <div class="btnrow"><button class="btn grow" data-act="link">${ICON.share}Create link and open e-mail</button><button class="btn grow" data-act="copylink">Copy link</button></div>
+      <div id="linkout"></div></div>`}`);
+  let links = null;
+  const getLinks = async () => links || (links = await Promise.all(items.map(async i => ({title: i.title, url: await shareLink(i.itemId)}))));
+  const linkText = ls => ls.map(l => ls.length > 1 ? `${l.title}:\n${l.url}` : l.url).join("\n\n");
+  panel.onclick = async e => {
+    const b = e.target.closest("[data-act]"); if (!b) return;
+    const a = b.dataset.act;
+    if (a === "close") return back ? back() : closePanel();
+    if (a === "eml") return busy(b, "Preparing…", async () => {
+      const files = []; for (const i of items) files.push(await i.getFile());
+      await saveBlob(await emlDraft(subject, items.length > 1 ? `Attached: ${items.map(i => i.title).join(", ")}.\n` : "", files));
+      toast("Open the downloaded e-mail file to send it");
+    });
+    if (a === "link" || a === "copylink") return busy(b, "Creating link…", async () => {
+      const ls = await getLinks(), text = linkText(ls);
+      $("#linkout", panel).innerHTML = `<div class="ocr">${esc(text)}</div>`;
+      if (a === "copylink") { try { await navigator.clipboard.writeText(text); toast("Link copied"); } catch { toast("Select the link above and copy it"); } return; }
+      const m = document.createElement("a");
+      m.href = `mailto:?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(text + "\n")}`;
+      document.body.appendChild(m); m.click(); m.remove();
+    });
+  };
+}
+const docMailItem = d => ({title: d.title || d.name, itemId: d.itemId, size: d.size || 0, getFile: () => docFile(d)});
+
 /* ---- create a new document from a file (split, cut out, merge) ---- */
 async function createDoc(blob, fields, ext = ".pdf") {
   const meta = {id: uid(), ...fields, createdAt: Date.now(), handled: false, hash: ""};
@@ -1507,15 +1564,21 @@ function openExport(list, label) {
         const zip = await buildExport(list, name, t => { b.textContent = t; });
         const file = new File([zip], `${name}.zip`, {type: "application/zip"});
         let where = "";
-        if (toOd) { b.textContent = "Saving to OneDrive…"; const it = await uploadFile("Exports", file.name, file, {replace: true}); where = `Saved in OneDrive › ${BASE} › Exports › ${it.name}.`; }
+        let odItem = null;
+        if (toOd) { b.textContent = "Saving to OneDrive…"; odItem = await uploadFile("Exports", file.name, file, {replace: true}); where = `Saved in OneDrive › ${BASE} › Exports › ${odItem.name}.`; }
+        panel._xitem = odItem;
         b.innerHTML = `${ICON.check}Export ready`;
         $("#x_out", panel).innerHTML = `<div class="flag info">${ICON.check}<span>${esc(where || "The export is ready.")}</span></div>
-          <div class="btnrow">${canDownload() ? `<button class="btn primary grow" data-act="xdl">${ICON.download}Download ZIP</button>` : ""}${canShare() ? `<button class="btn grow" data-act="xshare">${ICON.share}Share ZIP</button>` : ""}</div>`;
+          <div class="btnrow">${canDownload() ? `<button class="btn primary grow" data-act="xdl">${ICON.download}Download ZIP</button>` : ""}${!bridge() && canDownload() ? `<button class="btn grow" data-act="xmail">${ICON.mail}E-mail ZIP</button>` : ""}${canShare() ? `<button class="btn grow" data-act="xshare">${ICON.share}Share ZIP</button>` : ""}</div>`;
         panel.dataset.xfile = "1"; panel._xfile = file;
       } catch (err) { console.error(err); b.disabled = false; b.innerHTML = `${ICON.download}Make export`; toast(err.userMsg || errText(err)); }
     }
     if (b.dataset.act === "xdl") return busy(b, "Preparing…", () => saveBlob(panel._xfile));
     if (b.dataset.act === "xshare") return busy(b, "Preparing…", () => shareBlob(panel._xfile, panel._xfile.name));
+    if (b.dataset.act === "xmail") {
+      const f = panel._xfile, it = panel._xitem;
+      return openEmail([{title: f.name, itemId: it ? it.id : null, size: f.size, getFile: async () => f}], f.name.replace(/\.zip$/, ""));
+    }
   };
 }
 async function buildExport(list, name, progress) {
@@ -1846,6 +1909,7 @@ function openDetail(id, confirmDelete = false) {
     <div class="btnrow">
       ${canShare() ? `<button class="btn primary grow" data-act="share">${ICON.share}Share</button>` : ""}
       ${canDownload() ? `<button class="btn grow" data-act="download">${ICON.download}Download</button>` : ""}
+      ${!bridge() && canDownload() ? `<button class="btn grow" data-act="email">${ICON.mail}E-mail</button>` : ""}
       ${d.webUrl ? `<a class="btn grow" href="${esc(d.webUrl)}" target="_blank" rel="noopener">${ICON.open}Open in OneDrive</a>` : ""}
       <button class="btn grow" data-act="edit">Edit details</button>
       ${d.dueDate ? `<button class="btn grow" data-act="handled">${ICON.check}${d.handled ? "Mark as open" : "Mark as handled"}</button>` : ""}
@@ -1866,6 +1930,7 @@ function openDetail(id, confirmDelete = false) {
     if (a === "close") return closePanel();
     if (a === "download") return downloadDoc(d, b);
     if (a === "share") return shareDoc(d, b);
+    if (a === "email") return openEmail([docMailItem(d)], d.title || d.name, () => openDetail(d.id));
     if (a === "delask") return openDetail(id, true);
     if (a === "delno") return openDetail(id, false);
     if (a === "delyes") {
@@ -2046,6 +2111,7 @@ $("#selbar").addEventListener("click", e => {
   const chosen = [...state.sel].map(getDoc).filter(Boolean);
   if (a === "selexport") return openExport(chosen, `Selection ${new Date().toISOString().slice(0, 10)}`);
   if (a === "merge") return openMerge(chosen);
+  if (a === "selmail") return openEmail(chosen.map(docMailItem), chosen.length === 1 ? chosen[0].title : `${chosen.length} documents`);
 });
 $("#fab").addEventListener("click", () => startScan(true));
 $("#btnSettings").addEventListener("click", openSettings);
