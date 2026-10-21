@@ -745,7 +745,7 @@ function renderSelBar() {
   $("#fab").hidden = state.selecting;
   if (!state.selecting) { bar.hidden = true; return; }
   bar.hidden = false;
-  bar.innerHTML = `<span><b>${n}</b> selected</span><button class="btn" data-act="selall">Select all shown</button><button class="btn primary" data-act="merge" ${n >= 2 ? "" : "disabled"}>Merge into one</button><button class="btn" data-act="selexport" ${n ? "" : "disabled"}>${ICON.download}Export</button>${!bridge() && canDownload() ? `<button class="btn" data-act="selmail" ${n ? "" : "disabled"}>${ICON.mail}E-mail</button>` : ""}<button class="btn ghost" data-act="selcancel">Cancel</button>`;
+  bar.innerHTML = `<span><b>${n}</b> selected</span><button class="btn" data-act="selall">Select all shown</button>${canShareMany() ? `<button class="btn primary" data-act="selshare" ${n ? "" : "disabled"}>${ICON.share}Share</button>` : ""}<button class="btn" data-act="merge" ${n >= 2 ? "" : "disabled"}>Merge into one</button><button class="btn" data-act="selexport" ${n ? "" : "disabled"}>${ICON.download}Export</button>${!bridge() && canDownload() ? `<button class="btn" data-act="selmail" ${n ? "" : "disabled"}>${ICON.mail}E-mail</button>` : ""}<button class="btn ghost" data-act="selcancel">Cancel</button>`;
 }
 
 /* thumbnails from OneDrive, cached on this device */
@@ -1457,6 +1457,30 @@ async function shareBlob(f, title) {
   await navigator.share({files: [f], title: title || f.name});
 }
 function downloadDoc(d, b) { return busy(b, "Preparing…", async () => saveBlob(await docFile(d))); }
+function canShareMany() {
+  const br = bridge();
+  if (br) return true;
+  try { return !!(navigator.canShare && navigator.canShare({files: [new File(["x"], "a.pdf", {type: "application/pdf"}), new File(["x"], "b.pdf", {type: "application/pdf"})]})); } catch { return false; }
+}
+function shareMany(list, b) {
+  if (!list.length) return;
+  if (list.length === 1) return shareDoc(list[0], b);
+  return busy(b, `Preparing ${list.length} files…`, async () => {
+    const files = [];
+    for (let i = 0; i < list.length; i++) { b.textContent = `Preparing ${i + 1} of ${list.length}…`; files.push(await docFile(list[i])); }
+    const total = files.reduce((n, f) => n + f.size, 0);
+    if (total > 60 * 1024 * 1024) throw {userMsg: "These files are too large to share at once. Share fewer, or use Export."};
+    const title = `${list.length} documents`, br = bridge();
+    if (br) {
+      if (typeof br.shareFiles !== "function") throw {userMsg: "Update the Document Vault app to share several files at once (Install update at the top)."};
+      const payload = [];
+      for (const f of files) payload.push({name: f.name, mime: f.type, data: await blobToB64(f)});
+      br.shareFiles(JSON.stringify(payload), title);
+      return;
+    }
+    await navigator.share({files, title});
+  });
+}
 function shareDoc(d, b) { return busy(b, "Preparing…", async () => shareBlob(await docFile(d), d.title)); }
 
 /* ---- e-mail: a draft with attachments (.eml for Outlook) or OneDrive links ---- */
@@ -2093,6 +2117,20 @@ $("#list").addEventListener("click", e => {
   if (state.selecting) { const id = b.dataset.id; state.sel.has(id) ? state.sel.delete(id) : state.sel.add(id); return render(); }
   openDetail(b.dataset.id);
 });
+{
+  let t = null, sx = 0, sy = 0, fired = false, firedAt = 0;
+  const L = $("#list");
+  L.addEventListener("pointerdown", e => {
+    fired = false;
+    const d = e.target.closest(".doc"); if (!d || state.selecting) return;
+    sx = e.clientX; sy = e.clientY;
+    t = setTimeout(() => { fired = true; firedAt = Date.now(); state.selecting = true; state.sel = new Set([d.dataset.id]); render(); if (navigator.vibrate) navigator.vibrate(20); }, 550);
+  });
+  const stop = e => { if (t && (!e || e.type !== "pointermove" || Math.hypot(e.clientX - sx, e.clientY - sy) > 10)) { clearTimeout(t); t = null; } };
+  L.addEventListener("pointerup", stop); L.addEventListener("pointercancel", stop); L.addEventListener("pointermove", stop);
+  L.addEventListener("click", e => { if (fired && Date.now() - firedAt < 800) e.stopImmediatePropagation(); fired = false; }, true);
+  L.addEventListener("contextmenu", e => { if (e.target.closest(".doc") && (t || fired)) e.preventDefault(); });
+}
 $("#filterbar").addEventListener("change", e => {
   if (e.target.id === "fYear") state.year = e.target.value;
   if (e.target.id === "fAmt") state.amt = e.target.value;
@@ -2111,6 +2149,7 @@ $("#selbar").addEventListener("click", e => {
   const chosen = [...state.sel].map(getDoc).filter(Boolean);
   if (a === "selexport") return openExport(chosen, `Selection ${new Date().toISOString().slice(0, 10)}`);
   if (a === "merge") return openMerge(chosen);
+  if (a === "selshare") return shareMany(chosen, b);
   if (a === "selmail") return openEmail(chosen.map(docMailItem), chosen.length === 1 ? chosen[0].title : `${chosen.length} documents`);
 });
 $("#fab").addEventListener("click", () => startScan(true));

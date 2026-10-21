@@ -150,6 +150,11 @@ public class MainActivity extends Activity {
         return n.isEmpty() ? "document" : n;
     }
 
+    private static boolean allStartWith(java.util.Set<String> set, String prefix) {
+        for (String m : set) if (m == null || !m.startsWith(prefix)) return false;
+        return true;
+    }
+
     private void cleanShared() {
         File dir = new File(getCacheDir(), "shared");
         File[] old = dir.listFiles();
@@ -189,6 +194,43 @@ public class MainActivity extends Activity {
                 runOnUiThread(() -> startActivity(chooser));
             } catch (Exception e) {
                 runOnUiThread(() -> Toast.makeText(MainActivity.this, "Could not share this document.", Toast.LENGTH_SHORT).show());
+            }
+        }
+
+        @JavascriptInterface
+        public void shareFiles(String json, String title) {
+            if (!trustedPage()) return;
+            try {
+                org.json.JSONArray arr = new org.json.JSONArray(json);
+                File dir = new File(getCacheDir(), "shared");
+                //noinspection ResultOfMethodCallIgnored
+                dir.mkdirs();
+                ArrayList<Uri> uris = new ArrayList<>();
+                java.util.HashSet<String> mimes = new java.util.HashSet<>();
+                java.util.HashSet<String> used = new java.util.HashSet<>();
+                for (int i = 0; i < arr.length(); i++) {
+                    org.json.JSONObject o = arr.getJSONObject(i);
+                    String name = cleanName(o.optString("name", "document"));
+                    String base = name; int k = 2;
+                    while (!used.add(name)) name = base.replaceFirst("(\\.[^.]+)?$", " (" + (k++) + ")$1");
+                    File f = new File(dir, name);
+                    try (FileOutputStream out = new FileOutputStream(f)) {
+                        out.write(Base64.decode(o.getString("data"), Base64.DEFAULT));
+                    }
+                    uris.add(FileProvider.getUriForFile(MainActivity.this, getPackageName() + ".files", f));
+                    mimes.add(o.optString("mime", "application/octet-stream"));
+                }
+                String type = mimes.size() == 1 ? mimes.iterator().next()
+                        : (allStartWith(mimes, "image/") ? "image/*" : "*/*");
+                Intent send = new Intent(Intent.ACTION_SEND_MULTIPLE);
+                send.setType(type);
+                send.putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris);
+                send.putExtra(Intent.EXTRA_SUBJECT, title);
+                send.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                Intent chooser = Intent.createChooser(send, "Share documents");
+                runOnUiThread(() -> startActivity(chooser));
+            } catch (Exception e) {
+                runOnUiThread(() -> Toast.makeText(MainActivity.this, "Could not share these documents.", Toast.LENGTH_SHORT).show());
             }
         }
 
