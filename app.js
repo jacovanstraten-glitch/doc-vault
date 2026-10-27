@@ -40,7 +40,7 @@ const DEFAULT_CATS = {
 const SPACE_LABEL = {private: "Private", business: "Business"};
 const CURRENCIES = ["EUR","USD","GBP","ETB","KES","TZS"];
 const INBOX = "Inbox";
-const SCOPES = ["Files.ReadWrite"];
+const SCOPES = ["Files.ReadWrite.All"]; // .All: also folders other people shared with you (a shared family vault)
 const G = "https://graph.microsoft.com/v1.0";
 const BASE = ((window.DV_CONFIG && window.DV_CONFIG.folder) || "Document Vault").replace(/^\/+|\/+$/g, "");
 
@@ -190,7 +190,12 @@ async function g(method, path, {body, headers = {}, raw = false} = {}) {
   throw new GraphError(429, "OneDrive is busy. Try again in a minute.", "throttled");
 }
 const full = p => p ? `${BASE}/${p}` : BASE;
-const itemRef = p => `/me/drive/root:/${encPath(full(p))}:`;
+// Where the vault lives: your own OneDrive ("/me/drive", folder by path) or a vault someone shared with you (drive id + folder id).
+const vault = {drive: "/me/drive", folderId: null, shared: false, ownerName: "", folderWebUrl: ""};
+const DRIVE = () => vault.drive;
+const itemRef = p => vault.folderId
+  ? (p ? `${vault.drive}/items/${vault.folderId}:/${encPath(p)}:` : `${vault.drive}/items/${vault.folderId}`)
+  : `/me/drive/root:/${encPath(full(p))}:`;
 
 async function uploadFile(folder, name, blob, {replace = false, ifMatch = null} = {}) {
   const p = folder ? `${folder}/${name}` : name;
@@ -214,8 +219,8 @@ async function uploadFile(folder, name, blob, {replace = false, ifMatch = null} 
 }
 async function replaceContent(itemId, blob) {
   if (blob.size <= 3.5 * 1024 * 1024)
-    return g("PUT", `/me/drive/items/${itemId}/content`, {body: blob, headers: {"Content-Type": blob.type || "application/octet-stream"}});
-  const s = await g("POST", `/me/drive/items/${itemId}/createUploadSession`, {body: {item: {"@microsoft.graph.conflictBehavior": "replace"}}});
+    return g("PUT", `${DRIVE()}/items/${itemId}/content`, {body: blob, headers: {"Content-Type": blob.type || "application/octet-stream"}});
+  const s = await g("POST", `${DRIVE()}/items/${itemId}/createUploadSession`, {body: {item: {"@microsoft.graph.conflictBehavior": "replace"}}});
   const CH = 320 * 1024 * 10; let res = null;
   for (let start = 0; start < blob.size; start += CH) {
     const end = Math.min(blob.size, start + CH);
@@ -230,12 +235,13 @@ async function ensureFolder(path) {
   if (folderCache.has(path)) return folderCache.get(path);
   try { const it = await g("GET", itemRef(path)); folderCache.set(path, it.id); return it.id; }
   catch (e) { if (e.status !== 404) throw e; }
+  if (!path && vault.folderId) { folderCache.set("", vault.folderId); return vault.folderId; }
   if (!path) {
     try { const it = await g("POST", "/me/drive/root/children", {body: {name: BASE, folder: {}, "@microsoft.graph.conflictBehavior": "fail"}}); folderCache.set("", it.id); return it.id; }
     catch (e) { if (e.status !== 409) throw e; const it = await g("GET", itemRef("")); folderCache.set("", it.id); return it.id; }
   }
   const parts = path.split("/"), name = parts.pop(), parent = parts.join("/");
-  const parentPath = `/me/drive/items/${await ensureFolder(parent)}/children`;
+  const parentPath = `${DRIVE()}/items/${await ensureFolder(parent)}/children`;
   try {
     const it = await g("POST", parentPath, {body: {name, folder: {}, "@microsoft.graph.conflictBehavior": "fail"}});
     folderCache.set(path, it.id); return it.id;
@@ -246,10 +252,10 @@ async function ensureFolder(path) {
 }
 async function moveItem(itemId, folder, name) {
   const parentId = await ensureFolder(folder);
-  return g("PATCH", `/me/drive/items/${itemId}?@microsoft.graph.conflictBehavior=rename`, {body: {name, parentReference: {id: parentId}}});
+  return g("PATCH", `${DRIVE()}/items/${itemId}?@microsoft.graph.conflictBehavior=rename`, {body: {name, parentReference: {id: parentId}}});
 }
 async function downloadItem(itemId) {
-  const it = await g("GET", `/me/drive/items/${itemId}`);
+  const it = await g("GET", `${DRIVE()}/items/${itemId}`);
   const url = it["@microsoft.graph.downloadUrl"];
   if (!url) throw new GraphError(404, "File not found in OneDrive.", "notfound");
   const r = await fetch(url);
@@ -282,9 +288,10 @@ async function fetchRemoteIndex() {
   const idx = await r.json();
   return {index: idx && idx.docs ? idx : emptyIndex(), etag: meta.eTag};
 }
-async function cacheLocal() { await idb.set("kv", "index", {index: state.index, etag: state.etag, dirty: state.dirty}); }
+const idxKey = () => `index:${account ? account.username : ""}:${vault.folderId || "own"}`;
+async function cacheLocal() { await idb.set("kv", idxKey(), {index: state.index, etag: state.etag, dirty: state.dirty}); }
 async function loadIndex() {
-  const cached = await idb.get("kv", "index");
+  const cached = await idb.get("kv", idxKey());
   if (cached && cached.index) { state.index = mergeIndex(emptyIndex(), cached.index); state.etag = cached.etag; state.dirty = !!cached.dirty; state.loaded = true; render(); }
   await refreshIndex();
 }
@@ -318,7 +325,7 @@ async function saveIndex() {
       try {
         const it = await uploadFile("", INDEX, blob, {replace: !state.etag ? false : true, ifMatch: state.etag});
         if (!state.etag && it && it.name !== INDEX) { // created a renamed copy: someone else made index.json first
-          await g("DELETE", `/me/drive/items/${it.id}`).catch(() => {});
+          await g("DELETE", `${DRIVE()}/items/${it.id}`).catch(() => {});
           throw new GraphError(409, "conflict", "conflict");
         }
         state.etag = it.eTag; state.dirty = false; state.syncError = "";
@@ -355,7 +362,12 @@ function writeCsv() {
     try { await uploadFile("", "index.csv", new Blob(["﻿" + rows.join("\r\n")], {type: "text/csv"}), {replace: true}); } catch {}
   }, 4000);
 }
-function putDoc(d) { d.updatedAt = Date.now(); state.index.docs[d.id] = d; render(); scheduleSave(); }
+const me = () => (account && (account.name || account.username)) || "";
+function putDoc(d) {
+  d.updatedAt = Date.now();
+  if (!d.deleted) { if (!d.addedBy && !state.index.docs[d.id]) d.addedBy = me(); d.updatedBy = me(); }
+  state.index.docs[d.id] = d; render(); scheduleSave();
+}
 
 /* ================= image processing ================= */
 function applyEnhance(ctx, w, h, mode) {
@@ -773,7 +785,7 @@ async function loadThumb(itemId, v) {
   let blob = await idb.get("thumbs", k);
   if (!blob && state.online) {
     try {
-      const r = await g("GET", `/me/drive/items/${itemId}/thumbnails?select=medium`);
+      const r = await g("GET", `${DRIVE()}/items/${itemId}/thumbnails?select=medium`);
       const url = r.value && r.value[0] && r.value[0].medium && r.value[0].medium.url;
       if (url) {
         try { const x = await fetch(url); if (x.ok) { blob = await x.blob(); idb.set("thumbs", k, blob); } }
@@ -1229,18 +1241,41 @@ $("#importBox").addEventListener("click", e => {
 async function scanInbox() {
   if (!account || !state.online) return;
   let list;
-  try { list = await g("GET", `${itemRef(INBOX)}/children?$top=200&select=id,name,file,size,webUrl`); }
+  try { list = await g("GET", `${itemRef(INBOX)}/children?$top=200&select=id,name,file,size,webUrl,eTag,lastModifiedDateTime`); }
   catch (e) { return; }
   const known = new Set(docs().map(d => d.itemId)), queued = new Set(queue.map(q => q.remote && q.remote.id));
   const fresh = (list.value || []).filter(x => x.file && !known.has(x.id) && !queued.has(x.id) && (isPdfFile({name: x.name, type: x.file.mimeType}) || isMailFile({name: x.name, type: x.file.mimeType}) || /^image\//.test(x.file.mimeType || "")));
+  recoverProcessing(known);
   if (!fresh.length) return;
   for (const x of fresh) queue.push({remote: x, name: x.name, status: "waiting", note: ""});
   renderImport(); runQueue();
+}
+// A file another device claimed but never finished (closed mid-way) goes back to the Inbox after 15 minutes.
+async function recoverProcessing(known) {
+  try {
+    const l = await g("GET", `${itemRef(`${INBOX}/Processing`)}/children?$top=100&select=id,name,file,lastModifiedDateTime`);
+    for (const x of l.value || []) {
+      if (!x.file || known.has(x.id) || Date.now() - new Date(x.lastModifiedDateTime).getTime() < 15 * 60000) continue;
+      await moveItem(x.id, INBOX, x.name).catch(() => {});
+    }
+  } catch {}
+}
+async function claimInboxFile(x) {
+  const procId = await ensureFolder(`${INBOX}/Processing`);
+  try {
+    return await g("PATCH", `${DRIVE()}/items/${x.id}`, {body: {parentReference: {id: procId}}, headers: x.eTag ? {"If-Match": x.eTag} : {}});
+  } catch (e) {
+    if (e.status === 412 || e.status === 404 || e.status === 409) return null; // another device took it
+    throw e;
+  }
 }
 async function importOne(it) {
   if (it.combine) return importCombined(it);
   let f = it.file;
   if (it.remote) {
+    it.note = "Claiming the file"; renderImport();
+    const claimed = await claimInboxFile(it.remote);
+    if (!claimed) { it.status = "skipped"; it.note = "Being added on another device"; return; }
     it.note = "Downloading from OneDrive"; renderImport();
     const blob = await downloadItem(it.remote.id);
     f = new File([blob], it.remote.name, {type: it.remote.file.mimeType || blob.type});
@@ -1248,7 +1283,10 @@ async function importOne(it) {
   const buf = await f.arrayBuffer();
   const hash = await sha256(buf);
   const dup = hash && docs().find(d => d.hash === hash);
-  if (dup) { it.status = "skipped"; it.note = "Already in your vault"; return; }
+  if (dup) {
+    if (it.remote) await moveItem(it.remote.id, `${INBOX}/Duplicates`, it.remote.name).catch(() => {});
+    it.status = "skipped"; it.note = "Already in your vault"; return;
+  }
   if (isMailFile(f)) return importEmail(it, f, buf, hash);
   const pdfFile = isPdfFile(f);
   let text = "", source = "", conf = null, pages = 1; const aiBlobs = [];
@@ -1304,7 +1342,7 @@ async function importOne(it) {
   if (it.remote) {
     meta.source = "inbox";
     it.note = "Filing in OneDrive"; renderImport();
-    up = filed ? await moveItem(it.remote.id, folderOf(meta), fileNameOf(meta, ext)) : it.remote;
+    up = await moveItem(it.remote.id, folderOf(meta), filed ? fileNameOf(meta, ext) : it.remote.name);
   } else {
     it.note = "Uploading to OneDrive"; renderImport();
     up = await uploadFile(folderOf(meta), fileNameOf(meta, ext), new Blob([buf], {type: meta.mime}));
@@ -1500,7 +1538,7 @@ async function emlDraft(subject, body, files) {
   return new File([parts.join("\r\n")], `${safeSeg(subject, 60)}.eml`, {type: "message/rfc822"});
 }
 async function shareLink(itemId) {
-  const r = await g("POST", `/me/drive/items/${itemId}/createLink`, {body: {type: "view", scope: "anonymous"}});
+  const r = await g("POST", `${DRIVE()}/items/${itemId}/createLink`, {body: {type: "view", scope: "anonymous"}});
   return r.link.webUrl;
 }
 // items: [{title, itemId, getFile: async () => File, size}]
@@ -1549,8 +1587,8 @@ async function createDoc(blob, fields, ext = ".pdf") {
   return meta;
 }
 async function deleteDoc(d) {
-  try { await g("DELETE", `/me/drive/items/${d.itemId}`); } catch (err) { if (err.status !== 404) throw err; }
-  if (d.originalItemId) { try { await g("DELETE", `/me/drive/items/${d.originalItemId}`); } catch {} }
+  try { await g("DELETE", `${DRIVE()}/items/${d.itemId}`); } catch (err) { if (err.status !== 404) throw err; }
+  if (d.originalItemId) { try { await g("DELETE", `${DRIVE()}/items/${d.originalItemId}`); } catch {} }
   putDoc({id: d.id, deleted: true, createdAt: d.createdAt});
 }
 const inherit = d => ({space: d.space, category: d.category, filed: d.filed, sender: d.sender, date: d.date, reference: "", amount: null, currency: d.currency || "EUR",
@@ -1926,7 +1964,7 @@ function openDetail(id, confirmDelete = false) {
     <dl class="facts">
       ${row("Date", esc(fmtDate(d.date)))}${row("From", highlight(d.sender || "", terms))}${row("Amount", amt ? `<span class="mono">${esc(amt)}</span>` : "")}
       ${row("Due / ends", esc(fmtDate(d.dueDate)))}${row("Reference", d.reference ? `<span class="mono">${highlight(d.reference, terms)}</span>` : "")}
-      ${row("Tags", esc((d.tags || []).join(", ")))}${row("Notes", d.notes ? highlight(d.notes, terms) : "")}${row("Pages", String(d.pages || 1))}
+      ${row("Tags", esc((d.tags || []).join(", ")))}${row("Notes", d.notes ? highlight(d.notes, terms) : "")}${row("Pages", String(d.pages || 1))}${vault.shared || (d.addedBy && d.addedBy !== me()) ? row("Added by", esc(d.addedBy || "")) + (d.updatedBy && d.updatedBy !== d.addedBy ? row("Last changed by", esc(d.updatedBy)) : "") : ""}
       ${row("OneDrive", `<span class="mono">${esc(BASE)}/${esc(d.path || "")}</span>`)}${row("Text from", esc({email: "E-mail", pdf: "PDF text", ocr: `Text recognition${d.ocrConf ? ` (${d.ocrConf}% sure)` : ""}`, ai: "AI", manual: "Typed"}[d.textSource] || ""))}
     </dl>
     ${d.text ? `<details${terms.length ? " open" : ""}><summary>Text in the document</summary><div class="ocr">${highlight(d.text, terms)}</div></details>` : ""}
@@ -2044,13 +2082,18 @@ async function tidyNames() {
 }
 
 /* ================= settings ================= */
+async function fillPeople() {
+  const el = $("#s_people", panel); if (!el) return;
+  const ppl = await vaultPeople();
+  if (el.isConnected) el.innerHTML = ppl.length ? `Shared with: ${ppl.map(p => `<b>${esc(p.who)}</b> (${p.role})`).join(", ")}.` : "Not shared with anyone yet.";
+}
 function openSettings() {
   const catBlock = sp => `<div class="card"><h3>${SPACE_LABEL[sp]} categories</h3><div class="catlist">${catsFor(sp).map((c, i) => `<span class="catitem">${esc(c)}<button data-act="rmcat" data-sp="${sp}" data-i="${i}" aria-label="Remove ${esc(c)}">${ICON.x}</button></span>`).join("")}</div>
     <div class="addrow"><input id="add_${sp}" placeholder="New category" maxlength="40"><button class="btn" data-act="addcat" data-sp="${sp}">Add</button></div></div>`;
   const n = docs().length;
   showPanel("Settings", `
     <div class="card"><h3>OneDrive</h3>
-      <p class="hint">Signed in as <b>${esc(account?.username || "")}</b>. Your ${n} document${n === 1 ? "" : "s"} are stored in <span class="mono">OneDrive › ${esc(BASE)}</span>, sorted into Private and Business folders by category. An <span class="mono">index.csv</span> there lists them all for Excel. Files you save into its <span class="mono">Inbox</span> folder on your PC are picked up and made searchable automatically.</p>
+      <p class="hint">Signed in as <b>${esc(account?.username || "")}</b>. Your ${n} document${n === 1 ? " is" : "s are"} stored in <span class="mono">OneDrive › ${esc(BASE)}</span>, sorted into Private and Business folders by category. An <span class="mono">index.csv</span> there lists them all for Excel. Files you save into its <span class="mono">Inbox</span> folder on your PC are picked up and made searchable automatically.</p>
       <div class="btnrow"><button class="btn grow" data-act="openfolder">${ICON.open}Open folder in OneDrive</button><button class="btn grow" data-act="sync">Sync now</button><button class="btn grow" data-act="signout">Sign out</button></div></div>
     <div class="card"><h3>AI for hard-to-read documents</h3>
       <p class="hint">Optional. Text is always read on your own device first. Only when a page is hard to read, such as a faded receipt, is it sent to AI. You need your own API key from console.anthropic.com; you pay per use, usually a few cents per document. The key is stored only on this device.</p>
@@ -2058,15 +2101,30 @@ function openSettings() {
       <div class="field"><label for="s_model">Model</label><input id="s_model" class="mono" value="${esc(lsGet("dv.aiModel", "") || "")}" placeholder="claude-haiku-5-5"></div>
       <label class="toggle"><input type="checkbox" id="s_auto" ${ai.auto ? "checked" : ""}>Use AI automatically when a document is hard to read</label>
       <div class="btnrow"><button class="btn primary grow" data-act="saveai">Save</button>${ai.on ? `<button class="btn grow" data-act="clearai">Remove key</button>` : ""}</div></div>
+    <div class="card"><h3>Family sharing</h3>
+      ${vault.shared ? `<p class="hint">You are using the shared vault${vault.ownerName ? ` of <b>${esc(vault.ownerName)}</b>` : ""}. Everything you add or change is visible to everyone who shares it.</p>
+        <div class="btnrow"><button class="btn grow" data-act="leaveshared">Stop using this shared vault on this device</button></div>`
+      : `<p class="hint">Share this vault with your partner. They sign in with their own Microsoft account and see and add the same documents. Changes are merged, never overwritten.</p>
+        <div class="addrow"><input id="s_invite" type="email" placeholder="E-mail address of their Microsoft account" autocomplete="off"><button class="btn primary" data-act="invite">Share</button></div>
+        <div id="s_people" class="hint">Loading who has access…</div>
+        <details><summary>Someone shared their vault with you?</summary><div class="addrow" style="margin-top:10px"><input id="s_link" placeholder="Paste the link from the invitation e-mail"><button class="btn" data-act="uselink">Use</button></div></details>`}</div>
     <div class="card"><h3>Reminders</h3><p class="hint">Put every upcoming payment date and warranty end in your calendar at once. Open the file with Outlook, Google Calendar or your phone's calendar.</p>
       <div class="btnrow"><button class="btn grow" data-act="allics">${ICON.cal}All upcoming dates (.ics)</button></div></div>
     <div class="card"><h3>Export for your accountant</h3><p class="hint">Choose Business, a year and if you like a category in the main screen, then tap <b>Export these</b>. You get a ZIP with the files and an Excel overview with totals.</p></div>
     ${catBlock("private")}${catBlock("business")}
     <div class="card"><h3>About</h3><p class="hint">Document Vault keeps a copy of the index on this device so search also works offline. Saving and viewing files needs an internet connection.</p></div>`);
+  fillPeople();
   panel.onclick = async e => {
     const b = e.target.closest("[data-act]"); if (!b) return;
     const a = b.dataset.act, sp = b.dataset.sp;
     if (a === "close") return closePanel();
+    if (a === "invite") {
+      const em = $("#s_invite", panel).value.trim();
+      if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(em)) return toast("Enter a valid e-mail address.");
+      return busy(b, "Sharing…", async () => { await inviteToVault(em); toast(`Invitation sent to ${em}`); openSettings(); });
+    }
+    if (a === "uselink") return busy(b, "Opening…", () => useSharedLink($("#s_link", panel).value));
+    if (a === "leaveshared") { lsSet("dv.vault:" + account.username, null); location.reload(); return; }
     if (a === "allics") {
       const today = new Date().toISOString().slice(0, 10);
       const list = docs().filter(d => d.dueDate && d.dueDate >= today && !d.handled);
@@ -2161,6 +2219,57 @@ document.addEventListener("visibilitychange", () => { if (!document.hidden && Da
 setInterval(() => { if (!document.hidden && account && !state.dirty) { lastRefresh = Date.now(); refreshIndex(); } }, 120000);
 window.addEventListener("beforeunload", e => { if (queueRunning || state.dirty) { e.preventDefault(); e.returnValue = ""; } });
 
+/* ================= shared family vault ================= */
+function useShared(driveId, folderId, ownerName, webUrl) {
+  Object.assign(vault, {drive: `/drives/${driveId}`, folderId, shared: true, ownerName: ownerName || "", folderWebUrl: webUrl || ""});
+  folderCache.clear();
+  lsSet("dv.vault:" + account.username, {driveId, folderId, ownerName, webUrl});
+}
+async function resolveVault() {
+  const saved = lsGet("dv.vault:" + account.username, null);
+  if (saved && saved.driveId) { useShared(saved.driveId, saved.folderId, saved.ownerName, saved.webUrl); return; }
+  // 1) a shortcut to a shared "Document Vault" in your own OneDrive
+  try {
+    const it = await g("GET", `/me/drive/root:/${encPath(BASE)}:`);
+    if (it.remoteItem) {
+      const ri = it.remoteItem;
+      return useShared(ri.parentReference.driveId, ri.id, ri.shared?.owner?.user?.displayName || ri.createdBy?.user?.displayName, ri.webUrl);
+    }
+    vault.folderWebUrl = it.webUrl || ""; return; // your own vault
+  } catch (e) { if (e.status !== 404) throw e; }
+  // 2) no folder of your own: look for one shared with you
+  try {
+    const r = await g("GET", "/me/drive/sharedWithMe?$top=200");
+    const hit = (r.value || []).find(x => (x.remoteItem?.folder || x.folder) && (x.name || x.remoteItem?.name) === BASE);
+    if (hit) {
+      const ri = hit.remoteItem || hit;
+      return useShared(ri.parentReference.driveId, ri.id, ri.shared?.owner?.user?.displayName || ri.createdBy?.user?.displayName, ri.webUrl);
+    }
+  } catch {}
+}
+async function useSharedLink(url) {
+  const token = "u!" + btoa(unescape(encodeURIComponent(url.trim()))).replace(/=+$/, "").replace(/\//g, "_").replace(/\+/g, "-");
+  const it = await g("GET", `/shares/${token}/driveItem`);
+  if (!it.folder) throw {userMsg: "That link is not a folder. Use the link to the Document Vault folder."};
+  useShared(it.parentReference.driveId, it.id, it.shared?.owner?.user?.displayName || it.createdBy?.user?.displayName, it.webUrl);
+  location.reload();
+}
+async function inviteToVault(email) {
+  const id = await ensureFolder("");
+  await g("POST", `${DRIVE()}/items/${id}/invite`, {body: {recipients: [{email}], roles: ["write"], requireSignIn: true, sendInvitation: true,
+    message: "I share my Document Vault with you. Open https://jacovanstraten-glitch.github.io/doc-vault/ and sign in with this e-mail address."}});
+}
+async function vaultPeople() {
+  try {
+    const id = await ensureFolder("");
+    const r = await g("GET", `${DRIVE()}/items/${id}/permissions`);
+    return (r.value || []).filter(p => !(p.roles || []).includes("owner")).map(p => {
+      const u = p.grantedToV2?.user || p.grantedTo?.user || (p.grantedToIdentitiesV2 || p.grantedToIdentities || [])[0]?.user || {};
+      return {id: p.id, who: u.displayName || u.email || p.invitation?.email || "Someone with the link", role: (p.roles || []).includes("write") ? "can edit" : "can view", link: !!p.link};
+    }).filter(p => !p.link);
+  } catch { return []; }
+}
+
 /* ================= start ================= */
 function gate(html) { const g0 = $("#gate"); g0.innerHTML = `<div class="box">${html}</div>`; g0.hidden = false; $("#app").hidden = true; return g0; }
 function showSetup(err = "") {
@@ -2189,6 +2298,7 @@ async function start() {
   if (!account) return showSignIn();
   $("#gate").hidden = true; $("#app").hidden = false;
   render();
+  try { await resolveVault(); } catch (e) { console.warn("vault lookup", e); }
   await loadIndex();
   lastRefresh = Date.now();
   if (!state.syncError) { await tidyNames(); scanInbox(); }

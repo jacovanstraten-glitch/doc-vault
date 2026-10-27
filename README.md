@@ -18,6 +18,17 @@ A personal document archive that runs in the browser on phone and PC and stores 
 - **Learns from you:** a new document from a sender you filed before is filed the same way automatically.
 - **AI only as a fallback (optional):** if OCR is unsure (faded receipt, handwriting), the page can be sent to Claude with your own API key. Without a key everything else works.
 
+## Sharing with your partner
+
+Settings › Family sharing › enter the e-mail address of their Microsoft account › Share. They get an invitation e-mail, add the folder to their OneDrive (Add shortcut to My files), open the app and sign in with their own account; the app finds the shared vault by itself (or paste the link under Settings).
+
+How conflicts are avoided:
+- The index is saved with OneDrive version checks; when both of you save at the same moment, the changes are merged per document, never overwritten.
+- New files never overwrite existing ones (OneDrive renames instead).
+- A file in the Inbox is claimed by one device before it is processed, so it is never imported twice.
+- Each document shows who added it and who changed it last.
+- If both edit the same document at the very same moment, the last save of that document wins.
+
 ## Security
 
 - The app is a static web page: there is no server of ours. Your files go directly between your device and your OneDrive.
